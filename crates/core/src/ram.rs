@@ -24,6 +24,7 @@ pub enum RamError {
     UnsupportedProduct(u16),
     ProtocolTooOld(u8),
     NotReady,
+    CustomEffect,
 }
 
 impl From<BusError> for RamError {
@@ -58,6 +59,79 @@ pub fn read_info(bus: &mut dyn Bus, addr: StickAddr) -> Result<StickInfo, RamErr
         return Err(RamError::UnsupportedProduct(product_id));
     }
     Ok(StickInfo { addr, product_id, protocol: data[28] })
+}
+
+use crate::effects::{Rgb, Settings};
+
+const REG_RESET_BUFFER: u8 = 0x0B;
+const REG_BINARY_WRITE: u8 = 0x20;
+const REG_STATUS: u8 = 0x30;
+const REG_DIRECT_BLOCK: u8 = 0x31;
+const REG_COMMIT: u8 = 0x82;
+const COMMIT_EFFECT: u8 = 1;
+const COMMIT_COLORS: u8 = 2;
+const STATUS_BUSY: u8 = 0x08;
+const READY_TRIES: u32 = 5;
+const READY_DELAY_MS: u64 = 10;
+
+fn write_buffer(bus: &mut dyn Bus, addr: StickAddr, data: &[u8], commit: u8) -> Result<(), RamError> {
+    bus.write_byte(addr, REG_RESET_BUFFER, 0)?;
+    bus.write_byte(addr, REG_BINARY_START, 0)?;
+    for &byte in data {
+        bus.write_byte(addr, REG_BINARY_WRITE, byte)?;
+    }
+    if bus.read_byte(addr, REG_CHECKSUM)? != crate::crc::crc8(data) {
+        return Err(RamError::ChecksumMismatch);
+    }
+    bus.write_byte(addr, REG_COMMIT, commit)?;
+    for _ in 0..READY_TRIES {
+        if bus.read_byte(addr, REG_STATUS)? & STATUS_BUSY == 0 {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(READY_DELAY_MS));
+    }
+    Err(RamError::NotReady)
+}
+
+fn effect_packet(mode: u8, settings: &Settings) -> [u8; 20] {
+    let Rgb(r1, g1, b1) = settings.color1;
+    let Rgb(r2, g2, b2) = settings.color2;
+    let color_mode = if settings.random { 0 } else { 1 };
+    let direction = if settings.effect.directions().is_empty() { 0 } else { settings.direction.byte() };
+    let mut packet = [0u8; 20];
+    packet[..12].copy_from_slice(&[
+        mode, settings.speed.byte(), color_mode, direction, r1, g1, b1, 255, r2, g2, b2, 255,
+    ]);
+    packet
+}
+
+pub fn apply_builtin(bus: &mut dyn Bus, stick: &StickInfo, settings: &Settings) -> Result<(), RamError> {
+    let settings = settings.normalized();
+    let mode = settings.effect.mode_byte().ok_or(RamError::CustomEffect)?;
+    write_buffer(bus, stick.addr, &effect_packet(mode, &settings), COMMIT_EFFECT)?;
+    if settings.effect == crate::effects::Effect::Static {
+        let Rgb(r, g, b) = settings.color1;
+        let mut colors = [0u8; LED_COUNT * 4];
+        for led in colors.chunks_exact_mut(4) {
+            led.copy_from_slice(&[r, g, b, 255]);
+        }
+        write_buffer(bus, stick.addr, &colors, COMMIT_COLORS)?;
+    }
+    Ok(())
+}
+
+pub fn write_direct(bus: &mut dyn Bus, stick: &StickInfo, leds: &[Rgb; LED_COUNT]) -> Result<(), RamError> {
+    if stick.protocol < 4 {
+        return Err(RamError::ProtocolTooOld(stick.protocol));
+    }
+    let mut packet = [0u8; 2 + LED_COUNT * 3];
+    packet[0] = LED_COUNT as u8;
+    for (slot, led) in packet[1..].chunks_exact_mut(3).zip(leds) {
+        slot.copy_from_slice(&[led.0, led.1, led.2]);
+    }
+    packet[31] = crate::crc::crc8(&packet[..31]);
+    bus.write_block(stick.addr, REG_DIRECT_BLOCK, &packet)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -126,5 +200,92 @@ mod tests {
     fn read_info_rejects_other_products() {
         let mut bus = FakeBus { info: info_block(0x0700, 4), ..Default::default() };
         assert_eq!(read_info(&mut bus, addr(0x58)), Err(RamError::UnsupportedProduct(0x0700)));
+    }
+
+    use crate::effects::{Effect, Rgb, Settings};
+
+    fn stick(protocol: u8) -> StickInfo {
+        StickInfo { addr: addr(0x58), product_id: 0x0101, protocol }
+    }
+
+    fn writes(bus: &FakeBus) -> Vec<(u8, u8)> {
+        bus.ops.iter().filter_map(|op| match op {
+            Op::Write(_, reg, value) => Some((*reg, *value)),
+            _ => None,
+        }).collect()
+    }
+
+    #[test]
+    fn effect_write_sends_the_exact_sequence() {
+        let mut bus = FakeBus::default();
+        let settings = Settings {
+            effect: Effect::ColorPulse, color1: Rgb(1, 2, 3), color2: Rgb(4, 5, 6),
+            ..Settings::default()
+        };
+        apply_builtin(&mut bus, &stick(4), &settings).unwrap();
+        let mut expected = vec![(0x0B, 0), (0x21, 0)];
+        for byte in [0x01, 0x00, 0x01, 0x00, 1, 2, 3, 255, 4, 5, 6, 255, 0, 0, 0, 0, 0, 0, 0, 0] {
+            expected.push((0x20, byte));
+        }
+        expected.push((0x82, 1));
+        assert_eq!(writes(&bus), expected);
+    }
+
+    #[test]
+    fn bad_checksum_never_commits() {
+        let mut bus = FakeBus { corrupt_checksum: true, ..Default::default() };
+        let settings = Settings { effect: Effect::Rainbow, ..Settings::default() };
+        assert_eq!(apply_builtin(&mut bus, &stick(4), &settings), Err(RamError::ChecksumMismatch));
+        assert!(!writes(&bus).iter().any(|(reg, _)| *reg == 0x82));
+    }
+
+    #[test]
+    fn stuck_controller_times_out() {
+        let mut bus = FakeBus { stuck_busy: true, ..Default::default() };
+        let settings = Settings { effect: Effect::Rainbow, ..Settings::default() };
+        assert_eq!(apply_builtin(&mut bus, &stick(4), &settings), Err(RamError::NotReady));
+    }
+
+    #[test]
+    fn static_also_writes_every_led() {
+        let mut bus = FakeBus::default();
+        let settings = Settings { effect: Effect::Static, color1: Rgb(9, 8, 7), ..Settings::default() };
+        apply_builtin(&mut bus, &stick(4), &settings).unwrap();
+        let all = writes(&bus);
+        assert_eq!(all.iter().filter(|(reg, _)| *reg == 0x82).count(), 2);
+        assert_eq!(all.last(), Some(&(0x82, 2)));
+    }
+
+    #[test]
+    fn custom_effects_are_never_sent_as_a_mode() {
+        let mut bus = FakeBus::default();
+        let settings = Settings { effect: Effect::Chase, ..Settings::default() };
+        assert!(apply_builtin(&mut bus, &stick(4), &settings).is_err());
+        assert!(bus.ops.is_empty());
+    }
+
+    #[test]
+    fn direct_write_is_one_block_with_crc() {
+        let mut bus = FakeBus::default();
+        write_direct(&mut bus, &stick(4), &[Rgb(1, 2, 3); LED_COUNT]).unwrap();
+        match &bus.ops[..] {
+            [Op::Block(0x58, 0x31, data)] => {
+                assert_eq!(data.len(), 32);
+                assert_eq!(data[0], 10);
+                assert_eq!(&data[1..4], &[1, 2, 3]);
+                assert_eq!(data[31], crate::crc::crc8(&data[..31]));
+            }
+            other => panic!("unexpected operations: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn direct_write_needs_protocol_4() {
+        let mut bus = FakeBus::default();
+        assert_eq!(
+            write_direct(&mut bus, &stick(3), &[Rgb(0, 0, 0); LED_COUNT]),
+            Err(RamError::ProtocolTooOld(3))
+        );
+        assert!(bus.ops.is_empty());
     }
 }
