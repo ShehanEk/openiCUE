@@ -81,11 +81,35 @@ mod tests {
     }
 
     #[test]
+    fn detect_ignores_a_wrong_id_b() {
+        let mut bus = FakeBus::default();
+        bus.regs.insert((0x58, REG_ID_A), 0x99);
+        bus.regs.insert((0x58, REG_ID_B), 0x03);
+        assert_eq!(detect(&mut bus), Vec::<StickAddr>::new());
+    }
+
+    #[test]
+    fn detect_accepts_every_known_id_pair() {
+        for a in [0x1A, 0x1B, 0x1C] {
+            for b in [0x01, 0x03, 0x04] {
+                let mut bus = FakeBus::default();
+                bus.regs.insert((0x58, REG_ID_A), a);
+                bus.regs.insert((0x58, REG_ID_B), b);
+                assert_eq!(detect(&mut bus), vec![addr(0x58)], "id pair {a:#x}/{b:#x}");
+            }
+        }
+    }
+
+    #[test]
     fn read_info_parses_product_and_protocol() {
         let mut bus = FakeBus { info: info_block(0x0101, 4), ..Default::default() };
         let info = read_info(&mut bus, addr(0x58)).unwrap();
         assert_eq!(info.product_id, 0x0101);
         assert_eq!(info.protocol, 4);
+        assert_eq!(bus.ops[0], Op::Write(0x58, REG_DEVICE_INFO, 0));
+        assert_eq!(bus.ops[1], Op::Write(0x58, REG_BINARY_START, 0));
+        assert_eq!(bus.ops.len(), 35);
+        assert!(bus.ops[2..].iter().all(|op| matches!(op, Op::Read(_, _))));
     }
 
     #[test]
