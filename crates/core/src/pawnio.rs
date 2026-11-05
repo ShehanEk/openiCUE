@@ -85,9 +85,7 @@ impl PawnIoBus {
         }
         let mut bus = PawnIoBus { device, smbus_lock };
         bus.load_module()?;
-        if bus.current_port()? != 0 {
-            return Err(BusError::UnexpectedPort);
-        }
+        bus.with_lock(|b| b.check_port())?;
         Ok(bus)
     }
 
@@ -120,20 +118,37 @@ impl PawnIoBus {
         Ok(())
     }
 
-    /// Runs one transfer while holding the lock shared with other hardware tools.
-    fn transfer(&mut self, input: &[u64], output: &mut [u64]) -> Result<(), BusError> {
+    /// Runs `op` while holding the lock shared with other hardware tools.
+    fn with_lock<T>(&mut self, op: impl FnOnce(&mut Self) -> Result<T, BusError>) -> Result<T, BusError> {
         let wait = unsafe { WaitForSingleObject(self.smbus_lock, LOCK_TIMEOUT_MS) };
         if wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED {
             return Err(BusError::Os(ERROR_LOCK_TIMEOUT));
         }
-        let result = self.call("ioctl_smbus_xfer", input, output);
+        let result = op(self);
         unsafe { ReleaseMutex(self.smbus_lock) };
         result
     }
 
+    /// Runs one transfer, first checking the port is still 0. Holds the lock throughout.
+    fn transfer(&mut self, input: &[u64], output: &mut [u64]) -> Result<(), BusError> {
+        self.with_lock(|b| {
+            b.check_port()?;
+            b.call("ioctl_smbus_xfer", input, output)
+        })
+    }
+
+    /// Fails unless the bus is on port 0. Call only with the lock held.
+    fn check_port(&mut self) -> Result<(), BusError> {
+        if self.current_port()? != 0 {
+            return Err(BusError::UnexpectedPort);
+        }
+        Ok(())
+    }
+
     /// Asks for the current port without changing it (-1 means query only).
+    /// Call only with the lock held.
     fn current_port(&mut self) -> Result<u64, BusError> {
-        let mut output = [0u64; 1];
+        let mut output = [u64::MAX; 1];
         self.call("ioctl_piix4_port_sel", &[u64::MAX], &mut output)?;
         Ok(output[0])
     }
@@ -160,16 +175,48 @@ impl Bus for PawnIoBus {
     }
 
     fn write_block(&mut self, addr: StickAddr, reg: u8, data: &[u8]) -> Result<(), BusError> {
-        if data.is_empty() || data.len() > 32 {
-            return Err(BusError::BlockTooLong);
-        }
-        let mut bytes = [0u8; 40];
-        bytes[0] = data.len() as u8;
-        bytes[1..=data.len()].copy_from_slice(data);
+        let cells = block_cells(data)?;
         let mut input = [addr.get() as u64, WRITE, reg as u64, PROTOCOL_BLOCK_DATA, 0, 0, 0, 0, 0];
-        for (slot, chunk) in input[4..].iter_mut().zip(bytes.chunks_exact(8)) {
-            *slot = u64::from_le_bytes(chunk.try_into().unwrap());
-        }
+        input[4..].copy_from_slice(&cells);
         self.transfer(&input, &mut [])
+    }
+}
+
+/// Packs the length byte then the data into five little-endian cells (40 bytes).
+fn block_cells(data: &[u8]) -> Result<[u64; 5], BusError> {
+    if data.is_empty() || data.len() > 32 {
+        return Err(BusError::BlockTooLong);
+    }
+    let mut bytes = [0u8; 40];
+    bytes[0] = data.len() as u8;
+    bytes[1..=data.len()].copy_from_slice(data);
+    let mut cells = [0u64; 5];
+    for (cell, chunk) in cells.iter_mut().zip(bytes.chunks_exact(8)) {
+        *cell = u64::from_le_bytes(chunk.try_into().unwrap());
+    }
+    Ok(cells)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_empty_and_oversized_blocks() {
+        assert_eq!(block_cells(&[]), Err(BusError::BlockTooLong));
+        assert_eq!(block_cells(&[0u8; 33]), Err(BusError::BlockTooLong));
+    }
+
+    #[test]
+    fn packs_a_single_byte() {
+        assert_eq!(block_cells(&[0xAA]), Ok([0xAA01, 0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn packs_a_full_block() {
+        let cells = block_cells(&[0x11; 32]).unwrap();
+        assert_eq!(cells[0], 0x1111_1111_1111_1120);
+        assert_eq!(cells[1..4], [0x1111_1111_1111_1111; 3]);
+        assert_eq!(cells[4], 0x11);
     }
 }
