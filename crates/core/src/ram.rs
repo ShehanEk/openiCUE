@@ -123,6 +123,8 @@ fn effect_packet(mode: u8, settings: &Settings) -> [u8; 20] {
     };
     let brightness = if specific { 255 } else { 0 };
     let color_mode = if settings.random { 0 } else { 1 };
+    // OpenRGB's "Custom" (static) mode never sets speed, so it sends the default 0.
+    let speed = if effect.has_speed() { settings.speed.byte() } else { 0 };
     let direction = if effect.directions().is_empty() {
         crate::effects::Direction::Left.byte()
     } else {
@@ -131,7 +133,7 @@ fn effect_packet(mode: u8, settings: &Settings) -> [u8; 20] {
     let (Rgb(r1, g1, b1), Rgb(r2, g2, b2)) = (c1, c2);
     let mut packet = [0u8; 20];
     packet[..12].copy_from_slice(&[
-        mode, settings.speed.byte(), color_mode, direction, r1, g1, b1, brightness, r2, g2, b2, brightness,
+        mode, speed, color_mode, direction, r1, g1, b1, brightness, r2, g2, b2, brightness,
     ]);
     packet
 }
