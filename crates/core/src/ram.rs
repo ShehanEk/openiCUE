@@ -12,9 +12,23 @@ const SUPPORTED_PRODUCT_IDS: [u16; 4] = [0x0100, 0x0101, 0x0300, 0x0301];
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct StickInfo {
-    pub addr: StickAddr,
-    pub product_id: u16,
-    pub protocol: u8,
+    addr: StickAddr,
+    product_id: u16,
+    protocol: u8,
+}
+
+impl StickInfo {
+    pub fn addr(&self) -> StickAddr {
+        self.addr
+    }
+
+    pub fn product_id(&self) -> u16 {
+        self.product_id
+    }
+
+    pub fn protocol(&self) -> u8 {
+        self.protocol
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -184,6 +198,15 @@ mod tests {
         assert_eq!(bus.ops[1], Op::Write(0x58, REG_BINARY_START, 0));
         assert_eq!(bus.ops.len(), 35);
         assert!(bus.ops[2..].iter().all(|op| matches!(op, Op::Read(_, _))));
+    }
+
+    #[test]
+    fn read_info_exposes_values_through_getters() {
+        let mut bus = FakeBus { info: info_block(0x0301, 4), ..Default::default() };
+        let info = read_info(&mut bus, addr(0x59)).unwrap();
+        assert_eq!(info.addr(), addr(0x59));
+        assert_eq!(info.product_id(), 0x0301);
+        assert_eq!(info.protocol(), 4);
     }
 
     #[test]
