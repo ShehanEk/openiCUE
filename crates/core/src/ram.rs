@@ -322,6 +322,112 @@ mod tests {
         }
     }
 
+    /// The writes OpenRGB's buffer path makes: reset, start, data bytes, commit.
+    fn buffer_writes(data: &[u8], commit: u8) -> Vec<(u8, u8)> {
+        let mut out = vec![(0x0B, 0), (0x21, 0)];
+        out.extend(data.iter().map(|&byte| (0x20, byte)));
+        out.push((0x82, commit));
+        out
+    }
+
+    fn packet(head: [u8; 12]) -> Vec<u8> {
+        let mut bytes = head.to_vec();
+        bytes.extend([0u8; 8]);
+        bytes
+    }
+
+    /// Every built-in effect's full 20-byte packet, as OpenRGB's `DeviceUpdateMode` sends it.
+    /// Rules (RGBController_CorsairDRAM.cpp, with `mode()` defaults from RGBControllerInterface.h):
+    /// - byte 2: `random = color_mode == MODE_COLORS_RANDOM` -> RANDOM_COLORS 0 / CUSTOM_COLORS 1.
+    /// - byte 3: modes without a direction keep `direction = 0` (MODE_DIRECTION_LEFT) -> 0x02.
+    /// - bytes 4-6, 8-10: zeroed, filled only for MODE_COLORS_MODE_SPECIFIC; color 2 only if
+    ///   `colors.size() == 2`. So zero for RainbowWave, Rainbow, Static and random.
+    /// - bytes 7, 11: `brightness`, BRIGHTNESS_DEFAULT 255 for modes with MODE_FLAG_HAS_BRIGHTNESS,
+    ///   else the default 0 (RainbowWave, Rainbow, Static).
+    /// - byte 1: Static ("Custom") never sets speed, so 0.
+    #[test]
+    fn every_effect_packet_matches_openrgb() {
+        use crate::effects::{Direction as D, Speed};
+        let z = 0u8;
+        // Static has a second write, so it is pinned in its own test below.
+        let cases: [(Effect, bool, D, [u8; 12]); 15] = [
+            (Effect::ColorShift, false, D::Down, [0x00, 2, 1, 2, 1, 2, 3, 255, 4, 5, 6, 255]),
+            (Effect::ColorShift, true, D::Down, [0x00, 2, 0, 2, z, z, z, 255, z, z, z, 255]),
+            (Effect::ColorPulse, false, D::Down, [0x01, 2, 1, 2, 1, 2, 3, 255, 4, 5, 6, 255]),
+            (Effect::ColorPulse, true, D::Down, [0x01, 2, 0, 2, z, z, z, 255, z, z, z, 255]),
+            (Effect::RainbowWave, false, D::Right, [0x03, 2, 1, 3, z, z, z, 0, z, z, z, 0]),
+            (Effect::ColorWave, false, D::Up, [0x04, 2, 1, 0, 1, 2, 3, 255, 4, 5, 6, 255]),
+            (Effect::ColorWave, true, D::Left, [0x04, 2, 0, 2, z, z, z, 255, z, z, z, 255]),
+            (Effect::Visor, false, D::Horizontal, [0x05, 2, 1, 3, 1, 2, 3, 255, 4, 5, 6, 255]),
+            (Effect::Visor, true, D::Vertical, [0x05, 2, 0, 1, z, z, z, 255, z, z, z, 255]),
+            (Effect::Rain, false, D::Down, [0x06, 2, 1, 1, 1, 2, 3, 255, 4, 5, 6, 255]),
+            (Effect::Rain, true, D::Up, [0x06, 2, 0, 0, z, z, z, 255, z, z, z, 255]),
+            (Effect::Marquee, false, D::Down, [0x07, 2, 1, 2, 1, 2, 3, 255, z, z, z, 255]),
+            (Effect::Rainbow, false, D::Down, [0x08, 2, 1, 2, z, z, z, 0, z, z, z, 0]),
+            (Effect::Sequential, false, D::Up, [0x09, 2, 1, 0, 1, 2, 3, 255, z, z, z, 255]),
+            (Effect::Sequential, true, D::Down, [0x09, 2, 0, 1, z, z, z, 255, z, z, z, 255]),
+        ];
+        for (effect, random, direction, head) in cases {
+            let mut bus = FakeBus::default();
+            let settings = Settings {
+                effect, random, direction, speed: Speed::Fast,
+                color1: Rgb(1, 2, 3), color2: Rgb(4, 5, 6),
+            };
+            apply_builtin(&mut bus, &stick(4), &settings).unwrap();
+            assert_eq!(writes(&bus), buffer_writes(&packet(head), 1), "{effect:?} random={random}");
+        }
+    }
+
+    #[test]
+    fn random_is_dropped_where_openrgb_has_no_random_flag() {
+        for effect in [Effect::Static, Effect::RainbowWave, Effect::Marquee, Effect::Rainbow] {
+            let packet_for = |random| {
+                let mut bus = FakeBus::default();
+                let settings = Settings { effect, random, ..Settings::default() };
+                apply_builtin(&mut bus, &stick(4), &settings).unwrap();
+                writes(&bus)
+            };
+            assert_eq!(packet_for(true), packet_for(false), "{effect:?}");
+        }
+    }
+
+    /// Static: effect packet (OpenRGB "Custom": speed, brightness and colors default to 0),
+    /// then `SetColorsPerLED`: `r, g, b, 0xFF` per LED, committed with ID_COLOR_DATA (2).
+    #[test]
+    fn static_sends_the_exact_effect_then_colors_sequence() {
+        let mut bus = FakeBus::default();
+        let settings = Settings {
+            effect: Effect::Static, color1: Rgb(9, 8, 7), color2: Rgb(4, 5, 6),
+            speed: crate::effects::Speed::Fast, ..Settings::default()
+        };
+        apply_builtin(&mut bus, &stick(4), &settings).unwrap();
+        let mut expected = buffer_writes(&packet([0x10, 0, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0]), 1);
+        let colors: Vec<u8> = [9u8, 8, 7, 0xFF].repeat(10);
+        assert_eq!(colors.len(), 40);
+        expected.extend(buffer_writes(&colors, 2));
+        assert_eq!(writes(&bus), expected);
+    }
+
+    /// Direct block: count 10, RGB per LED in order (Vengeance RGB Pro: `reverse` false),
+    /// CRC-8 of bytes 0-30 last, one block write to COLOR_BUFFER_BLOCK_1 (0x31).
+    #[test]
+    fn direct_block_has_every_byte_in_order() {
+        let mut leds = [Rgb(0, 0, 0); LED_COUNT];
+        for (i, led) in leds.iter_mut().enumerate() {
+            let base = (i * 3) as u8;
+            *led = Rgb(base + 1, base + 2, base + 3);
+        }
+        let mut bus = FakeBus::default();
+        write_direct(&mut bus, &stick(4), &leds).unwrap();
+        let mut expected = vec![10u8];
+        expected.extend(1..=30u8);
+        expected.push(DIRECT_CRC);
+        assert_eq!(bus.ops, vec![Op::Block(0x58, 0x31, expected)]);
+    }
+
+    /// CRC-8 (poly 0x07, init 0) of bytes 0-30, computed independently outside this crate.
+    const DIRECT_CRC: u8 = 0x7C;
+
     #[test]
     fn direct_write_needs_protocol_4() {
         let mut bus = FakeBus::default();

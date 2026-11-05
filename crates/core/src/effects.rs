@@ -158,6 +158,42 @@ mod tests {
         assert_eq!(ALL_EFFECTS.iter().filter(|e| e.is_custom()).count(), 3);
     }
 
+    /// Pinned to OpenRGB's CorsairDRAMController.h `CORSAIR_DRAM_MODE_*`.
+    #[test]
+    fn mode_bytes_match_openrgb() {
+        let expected = [
+            (Effect::Static, Some(0x10)), (Effect::ColorShift, Some(0x00)),
+            (Effect::ColorPulse, Some(0x01)), (Effect::RainbowWave, Some(0x03)),
+            (Effect::ColorWave, Some(0x04)), (Effect::Visor, Some(0x05)),
+            (Effect::Rain, Some(0x06)), (Effect::Marquee, Some(0x07)),
+            (Effect::Rainbow, Some(0x08)), (Effect::Sequential, Some(0x09)),
+            (Effect::Breathing, None), (Effect::Chase, None), (Effect::Gradient, None),
+        ];
+        assert_eq!(expected.len(), ALL_EFFECTS.len());
+        for (effect, byte) in expected {
+            assert_eq!(effect.mode_byte(), byte, "{effect:?}");
+        }
+    }
+
+    /// Pinned to `CORSAIR_DRAM_SPEED_*`.
+    #[test]
+    fn speed_bytes_match_openrgb() {
+        assert_eq!(Speed::Slow.byte(), 0x00);
+        assert_eq!(Speed::Medium.byte(), 0x01);
+        assert_eq!(Speed::Fast.byte(), 0x02);
+    }
+
+    /// Pinned to `CORSAIR_DRAM_DIRECTION_*`.
+    #[test]
+    fn direction_bytes_match_openrgb() {
+        assert_eq!(Direction::Up.byte(), 0x00);
+        assert_eq!(Direction::Down.byte(), 0x01);
+        assert_eq!(Direction::Left.byte(), 0x02);
+        assert_eq!(Direction::Right.byte(), 0x03);
+        assert_eq!(Direction::Vertical.byte(), 0x01);
+        assert_eq!(Direction::Horizontal.byte(), 0x03);
+    }
+
     #[test]
     fn normalized_removes_unsupported_options() {
         let settings = Settings {
