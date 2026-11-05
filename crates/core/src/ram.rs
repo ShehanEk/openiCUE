@@ -107,14 +107,31 @@ fn write_buffer(bus: &mut dyn Bus, addr: StickAddr, data: &[u8], commit: u8) -> 
     Err(RamError::NotReady)
 }
 
+const EFFECT_SETTLE_MS: u64 = 15;
+
+/// Builds the 20 bytes OpenRGB's `DeviceUpdateMode` sends, including its mode defaults
+/// (`direction = 0` is LEFT, `brightness = 0`, colors zeroed unless mode-specific).
 fn effect_packet(mode: u8, settings: &Settings) -> [u8; 20] {
-    let Rgb(r1, g1, b1) = settings.color1;
-    let Rgb(r2, g2, b2) = settings.color2;
+    let effect = settings.effect;
+    // OpenRGB's MODE_COLORS_MODE_SPECIFIC modes are the ones with colors, except Static ("Custom").
+    let specific = effect.color_count() > 0 && effect != crate::effects::Effect::Static;
+    let off = Rgb(0, 0, 0);
+    let (c1, c2) = match (specific && !settings.random, effect.color_count()) {
+        (true, 2) => (settings.color1, settings.color2),
+        (true, _) => (settings.color1, off),
+        (false, _) => (off, off),
+    };
+    let brightness = if specific { 255 } else { 0 };
     let color_mode = if settings.random { 0 } else { 1 };
-    let direction = if settings.effect.directions().is_empty() { 0 } else { settings.direction.byte() };
+    let direction = if effect.directions().is_empty() {
+        crate::effects::Direction::Left.byte()
+    } else {
+        settings.direction.byte()
+    };
+    let (Rgb(r1, g1, b1), Rgb(r2, g2, b2)) = (c1, c2);
     let mut packet = [0u8; 20];
     packet[..12].copy_from_slice(&[
-        mode, settings.speed.byte(), color_mode, direction, r1, g1, b1, 255, r2, g2, b2, 255,
+        mode, settings.speed.byte(), color_mode, direction, r1, g1, b1, brightness, r2, g2, b2, brightness,
     ]);
     packet
 }
@@ -123,6 +140,7 @@ pub fn apply_builtin(bus: &mut dyn Bus, stick: &StickInfo, settings: &Settings) 
     let settings = settings.normalized();
     let mode = settings.effect.mode_byte().ok_or(RamError::CustomEffect)?;
     write_buffer(bus, stick.addr, &effect_packet(mode, &settings), COMMIT_EFFECT)?;
+    std::thread::sleep(std::time::Duration::from_millis(EFFECT_SETTLE_MS));
     if settings.effect == crate::effects::Effect::Static {
         let Rgb(r, g, b) = settings.color1;
         let mut colors = [0u8; LED_COUNT * 4];
@@ -247,7 +265,7 @@ mod tests {
         };
         apply_builtin(&mut bus, &stick(4), &settings).unwrap();
         let mut expected = vec![(0x0B, 0), (0x21, 0)];
-        for byte in [0x01, 0x00, 0x01, 0x00, 1, 2, 3, 255, 4, 5, 6, 255, 0, 0, 0, 0, 0, 0, 0, 0] {
+        for byte in [0x01, 0x00, 0x01, 0x02, 1, 2, 3, 255, 4, 5, 6, 255, 0, 0, 0, 0, 0, 0, 0, 0] {
             expected.push((0x20, byte));
         }
         expected.push((0x82, 1));
