@@ -21,6 +21,8 @@ pub enum BusError {
     Os(i32),
     /// The block is too long for one SMBus transfer.
     BlockTooLong,
+    /// The driver is not on SMBus port 0, so we refuse to talk to it.
+    UnexpectedPort,
 }
 
 pub trait Bus {

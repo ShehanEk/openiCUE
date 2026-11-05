@@ -3,6 +3,7 @@ pub mod config;
 pub mod crc;
 pub mod effects;
 pub mod frames;
+pub mod pawnio;
 pub mod ram;
 
 #[cfg(test)]
