@@ -10,6 +10,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "openicue-engine"
+version = "0.1.0"
+dependencies = [
+ "openicue-core",
+]
+
+[[package]]
 name = "openicue-hwtest"
 version = "0.1.0"
 dependencies = [
