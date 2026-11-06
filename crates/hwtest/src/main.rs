@@ -1,18 +1,20 @@
 use openicue_core::bus::{Bus, BusError, StickAddr};
 use openicue_core::effects::{Effect, Rgb, Settings, ALL_EFFECTS};
-use openicue_core::{pawnio::PawnIoBus, ram};
+use openicue_core::{pawnio::PawnIoBus, ram, system};
 use std::process::exit;
 
 /// NTSTATUS STATUS_ACCESS_DENIED, as `NtOpenFile` returns it.
 const STATUS_ACCESS_DENIED: i32 = 0xC000_0022_u32 as i32;
 
-const USAGE: &str = "usage: openicue-hwtest detect | info | one <58-5F> | effect <name>";
+const USAGE: &str = "usage: openicue-hwtest detect | info | one <58-5F> | effect <name> | save <name> | stop";
 
 enum Command {
     Detect,
     Info,
     One(StickAddr),
     Effect(Effect),
+    Save(Effect),
+    Stop,
 }
 
 fn main() {
@@ -22,6 +24,12 @@ fn main() {
         eprintln!("{message}");
         exit(2);
     });
+    // These two don't need the driver, so they run before it opens.
+    match command {
+        Command::Save(chosen) => return save(chosen),
+        Command::Stop => return stop(),
+        _ => {}
+    }
     let mut bus = PawnIoBus::open().unwrap_or_else(|error| {
         match error {
             BusError::Os(STATUS_ACCESS_DENIED) => {
@@ -36,6 +44,7 @@ fn main() {
         Command::Info => info(&mut bus),
         Command::One(addr) => one_stick(&mut bus, addr),
         Command::Effect(chosen) => effect(&mut bus, chosen),
+        Command::Save(_) | Command::Stop => unreachable!("handled before the driver opens"),
     }
 }
 
@@ -57,7 +66,33 @@ fn parse(args: &[&str]) -> Result<Command, String> {
                     ALL_EFFECTS.iter().filter(|e| !e.is_custom()).map(|e| e.name()).collect();
                 format!("unknown effect. Choose from {names:?}")
             }),
+        ["save", name] => Effect::from_name(name).map(Command::Save).ok_or_else(|| {
+            let names: Vec<&str> = ALL_EFFECTS.iter().map(|e| e.name()).collect();
+            format!("unknown effect. Choose from {names:?}")
+        }),
+        ["stop"] => Ok(Command::Stop),
         _ => Err(USAGE.to_string()),
+    }
+}
+
+/// Saves the effect, with default options, for the engine to use.
+fn save(chosen: Effect) {
+    let settings = Settings { effect: chosen, ..Settings::default() }.normalized();
+    if let Err(code) = system::save_settings(&settings) {
+        eprintln!("Could not save settings: Windows error {code}. Is this an admin terminal?");
+        exit(1);
+    }
+    println!("Saved {}", chosen.name());
+}
+
+/// Asks a running engine to stop. Does nothing if none is running.
+fn stop() {
+    match system::open_stop_event() {
+        Ok(event) => event.signal(),
+        Err(code) => {
+            eprintln!("Could not open the stop event: Windows error {code}. Is this an admin terminal?");
+            exit(1);
+        }
     }
 }
 
@@ -167,6 +202,22 @@ mod tests {
         assert!(matches!(parse(&["effect", "rainbow"]), Ok(Command::Effect(Effect::Rainbow))));
         assert!(parse(&["effect", "breathing"]).is_err());
         assert!(parse(&["effect", "nope"]).is_err());
+    }
+
+    #[test]
+    fn save_accepts_every_effect_including_custom_ones() {
+        for chosen in ALL_EFFECTS {
+            assert!(matches!(parse(&["save", chosen.name()]), Ok(Command::Save(e)) if e == chosen));
+        }
+        assert!(parse(&["save", "nope"]).is_err());
+        assert!(parse(&["save"]).is_err());
+        assert!(parse(&["save", "rainbow", "extra"]).is_err());
+    }
+
+    #[test]
+    fn stop_takes_no_arguments() {
+        assert!(matches!(parse(&["stop"]), Ok(Command::Stop)));
+        assert!(parse(&["stop", "now"]).is_err());
     }
 
     #[test]
