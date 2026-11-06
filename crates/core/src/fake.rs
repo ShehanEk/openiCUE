@@ -19,6 +19,8 @@ pub struct FakeBus {
     pub buffer: Vec<u8>,
     pub corrupt_checksum: bool,
     pub stuck_busy: bool,
+    /// The next this many status reads fail, like a busy stick that doesn't answer.
+    pub nack_status_reads: u32,
 }
 
 impl Bus for FakeBus {
@@ -33,6 +35,10 @@ impl Bus for FakeBus {
             0x42 => {
                 let source = if self.buffer.is_empty() { &self.info } else { &self.buffer };
                 crc8(source) ^ self.corrupt_checksum as u8
+            }
+            0x30 if self.nack_status_reads > 0 => {
+                self.nack_status_reads -= 1;
+                return Err(BusError::Os(433));
             }
             0x30 => if self.stuck_busy { 0x08 } else { 0x00 },
             _ => match self.regs.get(&(addr.get(), reg)) {

@@ -97,14 +97,49 @@ fn one_stick(bus: &mut dyn Bus, addr: StickAddr) {
         }
     };
     let settings = Settings { effect: Effect::Static, color1: Rgb(255, 0, 0), ..Settings::default() };
-    println!("{:?}", ram::apply_builtin(bus, &info, &settings));
+    let mut trace = Trace { inner: bus, count: 0 };
+    let result = ram::apply_builtin(&mut trace, &info, &settings);
+    println!("{result:?} after {} transfers", trace.count);
+}
+
+/// Passes transfers through and prints each one that fails, so a hardware
+/// error names its register. It adds no transfers of its own.
+struct Trace<'a> {
+    inner: &'a mut dyn Bus,
+    count: usize,
+}
+
+impl Trace<'_> {
+    fn note<T>(&mut self, result: Result<T, BusError>, what: String) -> Result<T, BusError> {
+        self.count += 1;
+        if let Err(error) = &result {
+            eprintln!("  transfer {}: {what} -> {error:?}", self.count);
+        }
+        result
+    }
+}
+
+impl Bus for Trace<'_> {
+    fn read_byte(&mut self, addr: StickAddr, reg: u8) -> Result<u8, BusError> {
+        let result = self.inner.read_byte(addr, reg);
+        self.note(result, format!("read {:#04x} reg {reg:#04x}", addr.get()))
+    }
+    fn write_byte(&mut self, addr: StickAddr, reg: u8, value: u8) -> Result<(), BusError> {
+        let result = self.inner.write_byte(addr, reg, value);
+        self.note(result, format!("write {:#04x} reg {reg:#04x} = {value:#04x}", addr.get()))
+    }
+    fn write_block(&mut self, addr: StickAddr, reg: u8, data: &[u8]) -> Result<(), BusError> {
+        let result = self.inner.write_block(addr, reg, data);
+        self.note(result, format!("block {:#04x} reg {reg:#04x}, {} bytes", addr.get(), data.len()))
+    }
 }
 
 /// Applies a built-in effect to every detected stick.
 fn effect(bus: &mut dyn Bus, chosen: Effect) {
     let settings = Settings { effect: chosen, ..Settings::default() };
     for stick in ram::detect(bus) {
-        let result = ram::read_info(bus, stick).and_then(|info| ram::apply_builtin(bus, &info, &settings));
+        let mut trace = Trace { inner: &mut *bus, count: 0 };
+        let result = ram::read_info(&mut trace, stick).and_then(|info| ram::apply_builtin(&mut trace, &info, &settings));
         println!("{:#04x}: {result:?}", stick.get());
     }
 }

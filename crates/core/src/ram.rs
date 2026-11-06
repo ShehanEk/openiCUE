@@ -99,7 +99,9 @@ fn write_buffer(bus: &mut dyn Bus, addr: StickAddr, data: &[u8], commit: u8) -> 
     }
     bus.write_byte(addr, REG_COMMIT, commit)?;
     for _ in 0..READY_TRIES {
-        if bus.read_byte(addr, REG_STATUS)? & STATUS_BUSY == 0 {
+        // As in OpenRGB's WaitReady, a failed status read counts as still busy,
+        // because the stick may not answer while it applies the commit.
+        if matches!(bus.read_byte(addr, REG_STATUS), Ok(status) if status & STATUS_BUSY == 0) {
             return Ok(());
         }
         std::thread::sleep(std::time::Duration::from_millis(READY_DELAY_MS));
@@ -280,6 +282,22 @@ mod tests {
         let settings = Settings { effect: Effect::Rainbow, ..Settings::default() };
         assert_eq!(apply_builtin(&mut bus, &stick(4), &settings), Err(RamError::ChecksumMismatch));
         assert!(!writes(&bus).iter().any(|(reg, _)| *reg == 0x82));
+    }
+
+    #[test]
+    fn unanswered_status_reads_count_as_busy() {
+        let mut bus = FakeBus { nack_status_reads: 2, ..Default::default() };
+        let settings = Settings { effect: Effect::Rainbow, ..Settings::default() };
+        assert_eq!(apply_builtin(&mut bus, &stick(4), &settings), Ok(()));
+        let polls = bus.ops.iter().filter(|op| matches!(op, Op::Read(_, 0x30))).count();
+        assert_eq!(polls, 3);
+    }
+
+    #[test]
+    fn status_reads_that_never_answer_time_out() {
+        let mut bus = FakeBus { nack_status_reads: 5, ..Default::default() };
+        let settings = Settings { effect: Effect::Rainbow, ..Settings::default() };
+        assert_eq!(apply_builtin(&mut bus, &stick(4), &settings), Err(RamError::NotReady));
     }
 
     #[test]
