@@ -11,12 +11,14 @@
 //! - 8: a direct write failed several times in a row while animating
 #![windows_subsystem = "windows"]
 use openicue_core::bus::Bus;
-use openicue_core::effects::Settings;
+use openicue_core::effects::{Rgb, Settings};
 use openicue_core::pawnio::PawnIoBus;
-use openicue_core::ram::{self, StickInfo};
+use openicue_core::ram::{self, StickInfo, LED_COUNT};
 use openicue_core::{frames, system};
 
-const FRAME_MS: u32 = 33;
+/// 15 frames per second. Each stick write keeps the CPU busy for about 2.4 ms
+/// while the SMBus sends it, so 30 fps cost 28.8% of a core (stage 4, 2026-11-06).
+const FRAME_MS: u32 = 66;
 /// Animation time restarts each day, so `f32` seconds keep their precision.
 const ANIMATION_PERIOD_SECONDS: f64 = 86_400.0;
 /// A stick may fail this many direct writes in a row before the engine gives up.
@@ -71,18 +73,38 @@ fn note_write(failures_in_a_row: &mut u32, ok: bool) -> bool {
 fn animate(bus: &mut dyn Bus, found: &[StickInfo], settings: &Settings, stop: &system::StopEvent) -> i32 {
     let start = std::time::Instant::now();
     let mut failures = vec![0u32; found.len()];
+    // The colors each stick last accepted. A stick whose colors haven't
+    // changed is skipped, since every write costs CPU time.
+    let mut shown: Vec<Option<[Rgb; LED_COUNT]>> = vec![None; found.len()];
     loop {
+        let frame_start = std::time::Instant::now();
         let seconds = (start.elapsed().as_secs_f64() % ANIMATION_PERIOD_SECONDS) as f32;
         let frame = frames::render(settings, seconds);
-        for ((stick, leds), count) in found.iter().zip(frame.iter()).zip(failures.iter_mut()) {
-            if note_write(count, ram::write_direct(bus, stick, leds).is_ok()) {
+        let sticks = found.iter().zip(frame.iter()).zip(failures.iter_mut()).zip(shown.iter_mut());
+        for (((stick, leds), count), last) in sticks {
+            if !needs_write(last, leds) {
+                continue;
+            }
+            let ok = ram::write_direct(bus, stick, leds).is_ok();
+            *last = ok.then_some(*leds);
+            if note_write(count, ok) {
                 return 8;
             }
         }
-        if stop.wait_ms(FRAME_MS) {
+        if stop.wait_ms(remaining_ms(frame_start.elapsed())) {
             return 0;
         }
     }
+}
+
+/// True unless the stick already shows exactly these colors.
+fn needs_write(last: &Option<[Rgb; LED_COUNT]>, leds: &[Rgb; LED_COUNT]) -> bool {
+    last.as_ref() != Some(leds)
+}
+
+/// Time left in this frame, so write time doesn't slow the frame rate.
+fn remaining_ms(spent: std::time::Duration) -> u32 {
+    FRAME_MS.saturating_sub(spent.as_millis().min(u32::MAX as u128) as u32)
 }
 
 #[cfg(test)]
@@ -95,6 +117,23 @@ mod tests {
         assert!(!note_write(&mut count, false));
         assert!(!note_write(&mut count, false));
         assert!(note_write(&mut count, false));
+    }
+
+    #[test]
+    fn unchanged_sticks_are_skipped_and_failed_ones_retried() {
+        let red = [Rgb(255, 0, 0); LED_COUNT];
+        let blue = [Rgb(0, 0, 255); LED_COUNT];
+        assert!(needs_write(&None, &red), "first frame, or after a failed write");
+        assert!(!needs_write(&Some(red), &red));
+        assert!(needs_write(&Some(red), &blue));
+    }
+
+    #[test]
+    fn frame_pacing_subtracts_write_time() {
+        use std::time::Duration;
+        assert_eq!(remaining_ms(Duration::from_millis(0)), FRAME_MS);
+        assert_eq!(remaining_ms(Duration::from_millis(16)), FRAME_MS - 16);
+        assert_eq!(remaining_ms(Duration::from_secs(5)), 0);
     }
 
     #[test]
