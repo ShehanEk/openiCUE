@@ -84,7 +84,9 @@ const REG_COMMIT: u8 = 0x82;
 const COMMIT_EFFECT: u8 = 1;
 const COMMIT_COLORS: u8 = 2;
 const STATUS_BUSY: u8 = 0x08;
-const READY_TRIES: u32 = 5;
+/// OpenRGB polls 5 times. These sticks stay silent longer than 50 ms after a
+/// commit (hardware stage 2, 2026-11-06), so we allow up to 500 ms.
+const READY_TRIES: u32 = 50;
 const READY_DELAY_MS: u64 = 10;
 
 fn write_buffer(bus: &mut dyn Bus, addr: StickAddr, data: &[u8], commit: u8) -> Result<(), RamError> {
@@ -97,10 +99,10 @@ fn write_buffer(bus: &mut dyn Bus, addr: StickAddr, data: &[u8], commit: u8) -> 
         return Err(RamError::ChecksumMismatch);
     }
     bus.write_byte(addr, REG_COMMIT, commit)?;
-    // As in OpenRGB's WaitReady: poll at most 5 times, count a failed read as
-    // busy, and carry on either way. These sticks don't answer status reads
-    // after a commit (hardware stage 2, 2026-11-06), and OpenRGB ignores the
-    // result too. The checksum check above is what guards each commit.
+    // As in OpenRGB's WaitReady: poll a bounded number of times, count a failed
+    // read as busy, and carry on either way, since OpenRGB ignores the result.
+    // If the stick is still silent, the next write fails and stops the
+    // sequence. The checksum check above is what guards each commit.
     for _ in 0..READY_TRIES {
         if matches!(bus.read_byte(addr, REG_STATUS), Ok(status) if status & STATUS_BUSY == 0) {
             break;
@@ -300,7 +302,7 @@ mod tests {
         let settings = Settings { effect: Effect::Static, color1: Rgb(9, 8, 7), ..Settings::default() };
         assert_eq!(apply_builtin(&mut bus, &stick(4), &settings), Ok(()));
         let polls = bus.ops.iter().filter(|op| matches!(op, Op::Read(_, 0x30))).count();
-        assert_eq!(polls, 10, "5 polls after each of the two commits");
+        assert_eq!(polls, 2 * READY_TRIES as usize, "every poll after each of the two commits");
         assert_eq!(writes(&bus).last(), Some(&(0x82, 2)));
     }
 
@@ -310,7 +312,7 @@ mod tests {
         let settings = Settings { effect: Effect::Rainbow, ..Settings::default() };
         assert_eq!(apply_builtin(&mut bus, &stick(4), &settings), Ok(()));
         let polls = bus.ops.iter().filter(|op| matches!(op, Op::Read(_, 0x30))).count();
-        assert_eq!(polls, 5);
+        assert_eq!(polls, READY_TRIES as usize);
     }
 
     #[test]
