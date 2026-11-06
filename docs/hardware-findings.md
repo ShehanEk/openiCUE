@@ -42,3 +42,12 @@ Command (admin terminal): `target\release\openicue-hwtest.exe one 58`
 - **Attempt 4:** with the wait raised to 500 ms max, the user reports `Ok` and exactly one stick red. **Pass.**
 - **Every attempt:** detect and info on `0x58` worked at the start, so the stick always recovered. A write that goes unacknowledged stops the sequence before any further commit.
 - **Still to measure:** the exact silence time. Count the `reg 0x30` trace lines, each about 10 ms.
+
+## 2026-11-06: Stage 3, all built-in effects on all sticks
+
+Commands (admin terminal): `target\release\openicue-hwtest.exe effect <name>` for rainbow-wave, static, color-shift, color-pulse, color-wave, visor, rain, marquee, rainbow and sequential.
+
+- **Result:** pass. Every effect returned `Ok(())` on all 4 sticks, and the user reports all of them look right.
+- **Silence after a commit:** on every stick, the status read got no acknowledgement 11 times and an answer on the 12th, so about 110-120 ms.
+- **Apply time:** each built-in effect costs about 130 ms per stick, and static costs twice that because it makes 2 commits. For 4 sticks that's about 0.5 s, or 1 s for static. The window should show a short "applying" state rather than freeze.
+- **Status register:** it never answers while the stick is busy, so the busy bit can't be read. The 500 ms bounded wait in `ram::write_buffer` covers this.
