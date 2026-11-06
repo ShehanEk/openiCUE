@@ -63,3 +63,9 @@ Commands (admin terminal): `hwtest save breathing`, `Start-Process openicue-engi
   - **Cause:** each frame is 4 block writes of 32 bytes. At SMBus speed each takes about 3 ms of bus time, and PawnIO's PIIX4 module waits for the bus inside the call (`microsleep_long` in `piix4_transaction`). That is about 120 writes/s x ~2.4 ms of CPU each.
   - **Not the cause:** the per-transfer port check is an ioctl with no bus traffic.
   - **What sets the cost:** CPU scales with bytes sent per second, so frame rate and skipping unchanged sticks are the levers. The bus clock is not something we change.
+- **Second measurement:** at 15 fps with frame pacing (`1181488`), CPU is 19.5-20.3% of one core. All of it is kernel time ("Driver" 20.3%, our code 0%).
+- **Model that fits both runs:** each 32-byte block write costs about 3.4 ms of CPU. PIIX4 at the default 93.75 kHz needs (10 + 9 x 34) bit times, about 3.4 ms, and the module waits it out with `microsleep_long`.
+  - 15 fps x 4 sticks x 3.4 ms = 20.4%, which matches.
+  - The first run's loop slept 33 ms after about 14 ms of writes, so it actually ran at about 21 fps: 21 x 4 x 3.4 ms = 29%, which also matches.
+  - So there is no fixed overhead. **CPU ≈ stick writes per second x 3.4 ms.**
+- **Levers:** fewer frames per second, or skipping sticks that haven't changed. Not used: raising the SMBus clock, which risks the RAM's SPD and other devices on the bus.
