@@ -16,3 +16,18 @@ Found 4 sticks:
 
 - **Result:** pass. All 4 sticks pass the ID check at `0x58`–`0x5B`. No writes.
 - **Note:** a first run in a non-admin terminal failed with `Os(-1073741790)` (`STATUS_ACCESS_DENIED`) when opening PawnIO. The driver only opens for administrators, as expected. The hwtest error message should say so plainly.
+
+## 2026-11-06: Stage 1b, device info
+
+Command (admin terminal): `target\release\openicue-hwtest.exe info`
+
+```
+0x58: product 0x0101, protocol 4
+0x59: product 0x0101, protocol 4
+0x5a: product 0x0101, protocol 4
+0x5b: product 0x0101, protocol 4
+```
+
+- **Result:** pass. All 4 sticks are product `0x0101` (Vengeance RGB Pro, 10 LEDs) with valid info checksums.
+- **Protocol 4:** direct block writes are supported, so custom effects are possible.
+- **Lighting:** unchanged, as expected.
