@@ -37,7 +37,6 @@ pub enum RamError {
     ChecksumMismatch,
     UnsupportedProduct(u16),
     ProtocolTooOld(u8),
-    NotReady,
     CustomEffect,
 }
 
@@ -98,15 +97,17 @@ fn write_buffer(bus: &mut dyn Bus, addr: StickAddr, data: &[u8], commit: u8) -> 
         return Err(RamError::ChecksumMismatch);
     }
     bus.write_byte(addr, REG_COMMIT, commit)?;
+    // As in OpenRGB's WaitReady: poll at most 5 times, count a failed read as
+    // busy, and carry on either way. These sticks don't answer status reads
+    // after a commit (hardware stage 2, 2026-11-06), and OpenRGB ignores the
+    // result too. The checksum check above is what guards each commit.
     for _ in 0..READY_TRIES {
-        // As in OpenRGB's WaitReady, a failed status read counts as still busy,
-        // because the stick may not answer while it applies the commit.
         if matches!(bus.read_byte(addr, REG_STATUS), Ok(status) if status & STATUS_BUSY == 0) {
-            return Ok(());
+            break;
         }
         std::thread::sleep(std::time::Duration::from_millis(READY_DELAY_MS));
     }
-    Err(RamError::NotReady)
+    Ok(())
 }
 
 const EFFECT_SETTLE_MS: u64 = 15;
@@ -294,17 +295,22 @@ mod tests {
     }
 
     #[test]
-    fn status_reads_that_never_answer_time_out() {
-        let mut bus = FakeBus { nack_status_reads: 5, ..Default::default() };
-        let settings = Settings { effect: Effect::Rainbow, ..Settings::default() };
-        assert_eq!(apply_builtin(&mut bus, &stick(4), &settings), Err(RamError::NotReady));
+    fn unanswered_wait_gives_up_after_five_polls_and_continues() {
+        let mut bus = FakeBus { nack_status_reads: u32::MAX, ..Default::default() };
+        let settings = Settings { effect: Effect::Static, color1: Rgb(9, 8, 7), ..Settings::default() };
+        assert_eq!(apply_builtin(&mut bus, &stick(4), &settings), Ok(()));
+        let polls = bus.ops.iter().filter(|op| matches!(op, Op::Read(_, 0x30))).count();
+        assert_eq!(polls, 10, "5 polls after each of the two commits");
+        assert_eq!(writes(&bus).last(), Some(&(0x82, 2)));
     }
 
     #[test]
-    fn stuck_controller_times_out() {
+    fn stuck_busy_wait_is_bounded() {
         let mut bus = FakeBus { stuck_busy: true, ..Default::default() };
         let settings = Settings { effect: Effect::Rainbow, ..Settings::default() };
-        assert_eq!(apply_builtin(&mut bus, &stick(4), &settings), Err(RamError::NotReady));
+        assert_eq!(apply_builtin(&mut bus, &stick(4), &settings), Ok(()));
+        let polls = bus.ops.iter().filter(|op| matches!(op, Op::Read(_, 0x30))).count();
+        assert_eq!(polls, 5);
     }
 
     #[test]
