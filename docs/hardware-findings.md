@@ -51,3 +51,15 @@ Commands (admin terminal): `target\release\openicue-hwtest.exe effect <name>` fo
 - **Silence after a commit:** on every stick, the status read got no acknowledgement 11 times and an answer on the 12th, so about 110-120 ms.
 - **Apply time:** each built-in effect costs about 130 ms per stick, and static costs twice that because it makes 2 commits. For 4 sticks that's about 0.5 s, or 1 s for static. The window should show a short "applying" state rather than freeze.
 - **Status register:** it never answers while the stick is busy, so the busy bit can't be read. The 500 ms bounded wait in `ram::write_buffer` covers this.
+
+## 2026-11-06: Stage 4, custom effect (Breathing) through the engine
+
+Commands (admin terminal): `hwtest save breathing`, `Start-Process openicue-engine.exe --run`, `hwtest stop`.
+
+- **Save:** `Saved breathing`. `icacls C:\ProgramData\openiCUE` shows only `NT AUTHORITY\SYSTEM:(OI)(CI)(F)` and `BUILTIN\Administrators:(OI)(CI)(F)`. Pass.
+- **Stop:** the engine exits with code 0 when signalled. Pass.
+- **Memory:** 1.4 MB private, 9.7 MB working set (shared DLLs included). Pass.
+- **CPU: 28.8% of one core** at 30 frames per second (`FRAME_MS` = 33), measured over 10 s. Too high.
+  - **Cause:** each frame is 4 block writes of 32 bytes. At SMBus speed each takes about 3 ms of bus time, and PawnIO's PIIX4 module waits for the bus inside the call (`microsleep_long` in `piix4_transaction`). That is about 120 writes/s x ~2.4 ms of CPU each.
+  - **Not the cause:** the per-transfer port check is an ioctl with no bus traffic.
+  - **What sets the cost:** CPU scales with bytes sent per second, so frame rate and skipping unchanged sticks are the levers. The bus clock is not something we change.
