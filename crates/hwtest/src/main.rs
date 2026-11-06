@@ -78,9 +78,16 @@ fn parse(args: &[&str]) -> Result<Command, String> {
 /// Saves the effect, with default options, for the engine to use.
 fn save(chosen: Effect) {
     let settings = Settings { effect: chosen, ..Settings::default() }.normalized();
-    if let Err(code) = system::save_settings(&settings) {
-        eprintln!("Could not save settings: Windows error {code}. Is this an admin terminal?");
-        exit(1);
+    match system::save_settings(&settings) {
+        Ok(()) => {}
+        Err(system::ERROR_DATA_DIR_UNTRUSTED) => {
+            eprintln!("C:\\ProgramData\\openiCUE was not created by an admin. Delete it, then retry.");
+            exit(1);
+        }
+        Err(code) => {
+            eprintln!("Could not save settings: Windows error {code}. Is this an admin terminal?");
+            exit(1);
+        }
     }
     println!("Saved {}", chosen.name());
 }

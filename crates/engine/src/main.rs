@@ -8,7 +8,7 @@
 //! - 5: could not open PawnIO
 //! - 6: no sticks found
 //! - 7: applying a built-in effect failed on at least one stick
-//! - 8: a direct write failed while animating a custom effect
+//! - 8: a direct write failed several times in a row while animating
 #![windows_subsystem = "windows"]
 use openicue_core::bus::Bus;
 use openicue_core::effects::Settings;
@@ -19,6 +19,8 @@ use openicue_core::{frames, system};
 const FRAME_MS: u32 = 33;
 /// Animation time restarts each day, so `f32` seconds keep their precision.
 const ANIMATION_PERIOD_SECONDS: f64 = 86_400.0;
+/// A stick may fail this many direct writes in a row before the engine gives up.
+const MAX_FAILED_WRITES: u32 = 3;
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -52,23 +54,57 @@ fn run() -> i32 {
     if settings.effect.is_custom() {
         animate(&mut bus, &found, &settings, &stop)
     } else {
-        let failed = found.iter().any(|s| ram::apply_builtin(&mut bus, s, &settings).is_err());
-        if failed { 7 } else { 0 }
+        // Try every stick, even after one fails.
+        let failed = found.iter().filter(|s| ram::apply_builtin(&mut bus, s, &settings).is_err()).count();
+        if failed > 0 { 7 } else { 0 }
     }
 }
 
+/// Counts one stick's failed writes in a row. Returns true when it's time to give up.
+fn note_write(failures_in_a_row: &mut u32, ok: bool) -> bool {
+    *failures_in_a_row = if ok { 0 } else { *failures_in_a_row + 1 };
+    *failures_in_a_row >= MAX_FAILED_WRITES
+}
+
+/// Only the first `frames::STICKS_IN_FRAME` (4) detected sticks animate,
+/// because a frame holds colors for 4 sticks; the `zip` drops the rest.
 fn animate(bus: &mut dyn Bus, found: &[StickInfo], settings: &Settings, stop: &system::StopEvent) -> i32 {
     let start = std::time::Instant::now();
+    let mut failures = vec![0u32; found.len()];
     loop {
         let seconds = (start.elapsed().as_secs_f64() % ANIMATION_PERIOD_SECONDS) as f32;
         let frame = frames::render(settings, seconds);
-        for (stick, leds) in found.iter().zip(frame.iter()) {
-            if ram::write_direct(bus, stick, leds).is_err() {
+        for ((stick, leds), count) in found.iter().zip(frame.iter()).zip(failures.iter_mut()) {
+            if note_write(count, ram::write_direct(bus, stick, leds).is_ok()) {
                 return 8;
             }
         }
         if stop.wait_ms(FRAME_MS) {
             return 0;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gives_up_after_three_failed_writes_in_a_row() {
+        let mut count = 0;
+        assert!(!note_write(&mut count, false));
+        assert!(!note_write(&mut count, false));
+        assert!(note_write(&mut count, false));
+    }
+
+    #[test]
+    fn a_success_resets_the_count() {
+        let mut count = 0;
+        assert!(!note_write(&mut count, false));
+        assert!(!note_write(&mut count, false));
+        assert!(!note_write(&mut count, true));
+        assert_eq!(count, 0);
+        assert!(!note_write(&mut count, false));
+        assert!(!note_write(&mut count, false));
     }
 }
