@@ -95,7 +95,12 @@ fn save(chosen: Effect) {
 /// Asks a running engine to stop. Does nothing if none is running.
 fn stop() {
     match system::open_stop_event() {
-        Ok(event) => event.signal(),
+        Ok(event) => {
+            event.signal();
+            if !event.already_existed() {
+                println!("No engine is running.");
+            }
+        }
         Err(code) => {
             eprintln!("Could not open the stop event: Windows error {code}. Is this an admin terminal?");
             exit(1);

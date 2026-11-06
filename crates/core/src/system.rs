@@ -17,7 +17,8 @@ use windows_sys::Win32::Security::Authorization::{
     SE_FILE_OBJECT, SE_KERNEL_OBJECT, SE_OBJECT_TYPE,
 };
 use windows_sys::Win32::Security::{
-    IsWellKnownSid, WinBuiltinAdministratorsSid, WinLocalSystemSid,
+    GetAce, IsValidSid, IsWellKnownSid, WinBuiltinAdministratorsSid, WinLocalSystemSid,
+    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, OBJECT_SECURITY_INFORMATION,
     OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
 };
 use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
@@ -30,6 +31,14 @@ use windows_sys::Win32::UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath};
 pub const ERROR_DATA_DIR_UNTRUSTED: u32 = 0x2000_0001;
 /// A named object already exists and its owner is not Administrators or System.
 pub const ERROR_UNTRUSTED_OWNER: u32 = 0x2000_0002;
+/// A file operation failed without an OS error code.
+pub const ERROR_NO_OS_CODE: u32 = 0x2000_0003;
+
+// ACE types (winnt.h). Allow types whose SID is at `SidStart`:
+const ACCESS_ALLOWED_ACE_TYPE: u8 = 0x0;
+const ACCESS_ALLOWED_CALLBACK_ACE_TYPE: u8 = 0x9;
+// Deny types, which can only take access away:
+const DENY_ACE_TYPES: [u8; 4] = [0x1, 0x6, 0xA, 0xC];
 
 /// Owned by Administrators; only System and Administrators get access.
 const ADMIN_ONLY: &str = "O:BAD:P(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)";
@@ -50,7 +59,7 @@ fn last_error() -> u32 {
 }
 
 fn os_error(error: std::io::Error) -> u32 {
-    error.raw_os_error().unwrap_or(0) as u32
+    error.raw_os_error().map_or(ERROR_NO_OS_CODE, |code| code as u32)
 }
 
 pub struct AdminDescriptor(PSECURITY_DESCRIPTOR);
@@ -80,17 +89,23 @@ impl AdminDescriptor {
         }
     }
 
-    /// Whether this descriptor's owner is Administrators or System.
+    /// Runs `check` on this descriptor's owner and DACL, as the live checks do.
     #[cfg(test)]
-    fn owner_is_admin(&self) -> bool {
-        use windows_sys::Win32::Security::GetSecurityDescriptorOwner;
-        let mut owner: PSID = null_mut();
-        let mut defaulted = 0;
+    fn passes(&self, check: unsafe fn(PSID, *const ACL) -> bool) -> bool {
+        use windows_sys::Win32::Security::{GetSecurityDescriptorDacl, GetSecurityDescriptorOwner};
+        let (mut owner, mut dacl): (PSID, *mut ACL) = (null_mut(), null_mut());
+        let (mut defaulted, mut present) = (0, 0);
         // SAFETY: `self.0` is a valid descriptor until drop; the out pointers
-        // are valid locals. `owner` points into `self.0`, alive for the check.
-        let ok = unsafe { GetSecurityDescriptorOwner(self.0, &mut owner, &mut defaulted) };
-        // SAFETY: `owner` is null or a SID inside `self.0`.
-        ok != 0 && unsafe { is_admin_sid(owner) }
+        // are valid locals, and the results point into `self.0`.
+        let ok = unsafe {
+            GetSecurityDescriptorOwner(self.0, &mut owner, &mut defaulted) != 0
+                && GetSecurityDescriptorDacl(self.0, &mut present, &mut dacl, &mut defaulted) != 0
+        };
+        if present == 0 {
+            dacl = null_mut();
+        }
+        // SAFETY: `owner` and `dacl` are null or point into `self.0`, alive here.
+        ok && unsafe { check(owner, dacl) }
     }
 }
 
@@ -105,32 +120,98 @@ impl Drop for AdminDescriptor {
 /// True only for BUILTIN\Administrators and LocalSystem.
 ///
 /// # Safety
-/// `sid` must be null or point to a valid SID.
+/// `sid` must be null or point to a SID inside live memory.
 unsafe fn is_admin_sid(sid: PSID) -> bool {
     !sid.is_null()
+        && IsValidSid(sid) != 0
         && (IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0
             || IsWellKnownSid(sid, WinLocalSystemSid) != 0)
 }
 
-/// Fails with `ERROR_UNTRUSTED_OWNER` unless the object behind `handle` is
-/// owned by Administrators or System. `handle` needs READ_CONTROL.
-fn require_admin_owner(handle: HANDLE, object_type: SE_OBJECT_TYPE) -> Result<(), u32> {
+/// True when the owner is Administrators or System; the DACL is ignored.
+///
+/// # Safety
+/// As for `is_admin_sid`.
+unsafe fn is_admin_owned(owner: PSID, _dacl: *const ACL) -> bool {
+    is_admin_sid(owner)
+}
+
+/// True when the owner is Administrators or System, the DACL exists, and
+/// every ACE in it either denies access or allows only those two. Any other
+/// ACE type, including other allow types, fails, to stay on the safe side.
+///
+/// # Safety
+/// `owner` as for `is_admin_sid`; `dacl` must be null or a valid ACL in live memory.
+unsafe fn is_admin_only(owner: PSID, dacl: *const ACL) -> bool {
+    if !is_admin_sid(owner) || dacl.is_null() {
+        return false;
+    }
+    for index in 0..u32::from((*dacl).AceCount) {
+        let mut ace: *mut core::ffi::c_void = null_mut();
+        if GetAce(dacl, index, &mut ace) == 0 || ace.is_null() {
+            return false;
+        }
+        let header = &*(ace as *const ACE_HEADER);
+        if DENY_ACE_TYPES.contains(&header.AceType) {
+            continue;
+        }
+        let simple_allow = header.AceType == ACCESS_ALLOWED_ACE_TYPE
+            || header.AceType == ACCESS_ALLOWED_CALLBACK_ACE_TYPE;
+        if !simple_allow || usize::from(header.AceSize) < std::mem::size_of::<ACCESS_ALLOWED_ACE>() {
+            return false;
+        }
+        let sid = std::ptr::addr_of!((*(ace as *const ACCESS_ALLOWED_ACE)).SidStart) as PSID;
+        if !is_admin_sid(sid) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Reads the object's security and runs `check` on its owner and DACL while
+/// the descriptor is alive. `handle` needs READ_CONTROL.
+fn check_security(
+    handle: HANDLE,
+    object_type: SE_OBJECT_TYPE,
+    info: OBJECT_SECURITY_INFORMATION,
+    check: unsafe fn(PSID, *const ACL) -> bool,
+) -> Result<bool, u32> {
     let mut owner: PSID = null_mut();
+    let mut dacl: *mut ACL = null_mut();
     let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
     // SAFETY: `handle` is open for the call; the out pointers are valid
     // locals, and the unused ones may be null.
     let status = unsafe {
-        GetSecurityInfo(handle, object_type, OWNER_SECURITY_INFORMATION,
-            &mut owner, null_mut(), null_mut(), null_mut(), &mut descriptor)
+        GetSecurityInfo(handle, object_type, info,
+            &mut owner, null_mut(), &mut dacl, null_mut(), &mut descriptor)
     };
     if status != 0 {
         return Err(status);
     }
-    // SAFETY: `owner` points into `descriptor`, which is still allocated.
-    let trusted = unsafe { is_admin_sid(owner) };
+    // SAFETY: `owner` and `dacl` are null or point into `descriptor`, still allocated.
+    let trusted = unsafe { check(owner, dacl) };
     // SAFETY: GetSecurityInfo allocated `descriptor` with LocalAlloc; freed once.
     unsafe { LocalFree(descriptor) };
-    if trusted { Ok(()) } else { Err(ERROR_UNTRUSTED_OWNER) }
+    Ok(trusted)
+}
+
+/// Fails with `ERROR_UNTRUSTED_OWNER` unless the kernel object behind
+/// `handle` is owned by Administrators or System.
+fn require_admin_owner(handle: HANDLE) -> Result<(), u32> {
+    match check_security(handle, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION, is_admin_owned)? {
+        true => Ok(()),
+        false => Err(ERROR_UNTRUSTED_OWNER),
+    }
+}
+
+/// Fails with `ERROR_DATA_DIR_UNTRUSTED` unless the folder behind `handle`
+/// is owned by Administrators or System and only they are allowed in.
+fn require_admin_only_folder(handle: HANDLE) -> Result<(), u32> {
+    let info = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+    match check_security(handle, SE_FILE_OBJECT, info, is_admin_only)? {
+        true => Ok(()),
+        false => Err(ERROR_DATA_DIR_UNTRUSTED),
+    }
 }
 
 /// The ProgramData folder from the shell, not from an environment variable.
@@ -185,11 +266,8 @@ pub fn secure_data_dir() -> Result<PathBuf, u32> {
     if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 || !metadata.is_dir() {
         return Err(ERROR_DATA_DIR_UNTRUSTED);
     }
-    match require_admin_owner(handle.as_raw_handle() as HANDLE, SE_FILE_OBJECT) {
-        Ok(()) => Ok(dir),
-        Err(ERROR_UNTRUSTED_OWNER) => Err(ERROR_DATA_DIR_UNTRUSTED),
-        Err(other) => Err(other),
-    }
+    require_admin_only_folder(handle.as_raw_handle() as HANDLE)?;
+    Ok(dir)
 }
 
 /// Reads at most one byte past the limit, and rejects anything over it.
@@ -213,7 +291,10 @@ pub fn save_settings(settings: &Settings) -> Result<(), u32> {
     std::fs::write(path, config::serialize(settings)).map_err(os_error)
 }
 
-pub struct StopEvent(HANDLE);
+pub struct StopEvent {
+    handle: HANDLE,
+    existed: bool,
+}
 
 pub fn open_stop_event() -> Result<StopEvent, u32> {
     let descriptor = AdminDescriptor::new()?;
@@ -227,31 +308,36 @@ pub fn open_stop_event() -> Result<StopEvent, u32> {
         return Err(last_error());
     }
     let existed = last_error() == ERROR_ALREADY_EXISTS;
-    let event = StopEvent(handle);
+    let event = StopEvent { handle, existed };
     if existed {
         // Dropping `event` on failure closes the handle.
-        require_admin_owner(event.0, SE_KERNEL_OBJECT)?;
+        require_admin_owner(event.handle)?;
     }
     Ok(event)
 }
 
 impl StopEvent {
+    /// False when this call created the event, so no engine was listening.
+    pub fn already_existed(&self) -> bool {
+        self.existed
+    }
+
     pub fn signal(&self) {
-        // SAFETY: `self.0` is an open event handle until drop.
-        unsafe { SetEvent(self.0) };
+        // SAFETY: `self.handle` is an open event handle until drop.
+        unsafe { SetEvent(self.handle) };
     }
     /// Waits up to `ms`. Returns true if a stop was requested, and also on
     /// any wait failure, so a broken handle can't spin the frame loop.
     pub fn wait_ms(&self, ms: u32) -> bool {
-        // SAFETY: `self.0` is an open event handle until drop.
-        unsafe { WaitForSingleObject(self.0, ms) != WAIT_TIMEOUT }
+        // SAFETY: `self.handle` is an open event handle until drop.
+        unsafe { WaitForSingleObject(self.handle, ms) != WAIT_TIMEOUT }
     }
 }
 
 impl Drop for StopEvent {
     fn drop(&mut self) {
-        // SAFETY: `self.0` is owned by this value and closed exactly once.
-        unsafe { CloseHandle(self.0) };
+        // SAFETY: `self.handle` is owned by this value and closed exactly once.
+        unsafe { CloseHandle(self.handle) };
     }
 }
 
@@ -272,7 +358,7 @@ pub fn claim_engine() -> Result<Option<EngineClaim>, u32> {
     let claim = EngineClaim(handle);
     if existed {
         // Dropping `claim` closes the handle on either path.
-        require_admin_owner(claim.0, SE_KERNEL_OBJECT)?;
+        require_admin_owner(claim.0)?;
         return Ok(None);
     }
     Ok(Some(claim))
@@ -296,13 +382,54 @@ mod tests {
 
     #[test]
     fn only_administrators_and_system_are_trusted_owners() {
-        let owner = |sddl: &str| AdminDescriptor::from_sddl(sddl).expect("descriptor").owner_is_admin();
+        let owner = |sddl: &str| AdminDescriptor::from_sddl(sddl).expect("descriptor").passes(is_admin_owned);
         assert!(owner(ADMIN_ONLY));
         assert!(owner("O:SY"));
         assert!(!owner("O:WD"), "Everyone");
         assert!(!owner("O:BU"), "Users");
         assert!(!owner("O:AU"), "Authenticated Users");
         assert!(!owner("D:P(A;;GA;;;BA)"), "no owner at all");
+    }
+
+    fn folder_ok(sddl: &str) -> bool {
+        AdminDescriptor::from_sddl(sddl).expect("descriptor").passes(is_admin_only)
+    }
+
+    #[test]
+    fn admin_only_folder_passes() {
+        assert!(folder_ok("O:BAD:P(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)"));
+        assert!(folder_ok("O:SYD:P(A;OICI;GA;;;BA)"));
+    }
+
+    #[test]
+    fn folder_that_allows_anyone_else_fails() {
+        assert!(!folder_ok("O:BAD:P(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)(A;;FA;;;BU)"));
+        assert!(!folder_ok("O:BAD:P(A;OICI;GA;;;BA)(A;CIIO;0x116;;;BU)"), "inherit-only allow");
+        assert!(!folder_ok("O:BAD:P(A;;GA;;;BA)(A;;FR;;;WD)"), "Everyone read");
+    }
+
+    #[test]
+    fn folder_with_a_null_or_missing_dacl_fails() {
+        assert!(!folder_ok("O:BAD:NO_ACCESS_CONTROL"));
+        assert!(!folder_ok("O:BA"));
+    }
+
+    #[test]
+    fn folder_owned_by_users_fails_even_with_an_admin_only_dacl() {
+        assert!(!folder_ok("O:BUD:P(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)"));
+    }
+
+    #[test]
+    fn deny_aces_may_stay() {
+        assert!(folder_ok("O:BAD:P(D;;FA;;;BU)(A;OICI;GA;;;BA)"));
+    }
+
+    #[test]
+    fn io_errors_without_an_os_code_are_never_zero() {
+        let code = os_error(std::io::Error::other("no code"));
+        assert_eq!(code, ERROR_NO_OS_CODE);
+        assert_ne!(code & 0x2000_0000, 0);
+        assert_eq!(os_error(std::io::Error::from_raw_os_error(5)), 5);
     }
 
     #[test]
