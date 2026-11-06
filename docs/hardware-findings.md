@@ -69,3 +69,4 @@ Commands (admin terminal): `hwtest save breathing`, `Start-Process openicue-engi
   - The first run's loop slept 33 ms after about 14 ms of writes, so it actually ran at about 21 fps: 21 x 4 x 3.4 ms = 29%, which also matches.
   - So there is no fixed overhead. **CPU ≈ stick writes per second x 3.4 ms.**
 - **Levers:** fewer frames per second, or skipping sticks that haven't changed. Not used: raising the SMBus clock, which risks the RAM's SPD and other devices on the bus.
+- **At 10 fps (`4261e91`, the user's choice):** 13% of one core, which matches the model (10 x 4 x 3.4 ms ≈ 13.6%). Private memory 1.4 MB.
