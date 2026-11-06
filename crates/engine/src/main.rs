@@ -16,9 +16,10 @@ use openicue_core::pawnio::PawnIoBus;
 use openicue_core::ram::{self, StickInfo, LED_COUNT};
 use openicue_core::{frames, system};
 
-/// 15 frames per second. Each stick write keeps the CPU busy for about 2.4 ms
-/// while the SMBus sends it, so 30 fps cost 28.8% of a core (stage 4, 2026-11-06).
-const FRAME_MS: u32 = 66;
+/// 10 frames per second (user choice, 2026-11-06). Each stick write keeps the
+/// CPU busy for about 3.4 ms while the SMBus sends it, so CPU is about
+/// writes per second x 3.4 ms: ~14% of a core here, ~20% at 15 fps.
+const FRAME_MS: u32 = 100;
 /// Animation time restarts each day, so `f32` seconds keep their precision.
 const ANIMATION_PERIOD_SECONDS: f64 = 86_400.0;
 /// A stick may fail this many direct writes in a row before the engine gives up.
