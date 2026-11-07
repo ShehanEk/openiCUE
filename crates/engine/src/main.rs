@@ -1,7 +1,8 @@
 //! Background engine: `openicue-engine.exe --restore | --run`.
 //!
 //! Exit codes, readable through `Start-Process -Wait -PassThru`:
-//! - 0: built-in effect applied, or a custom effect stopped on request
+//! - 0: built-in effect applied (`--run`) or already kept by the sticks
+//!   (`--restore`), or a custom effect stopped on request
 //! - 2: missing, unknown or extra arguments
 //! - 3: another engine is already running, or the claim failed
 //! - 4: could not open the stop event
@@ -32,7 +33,8 @@ fn main() {
         std::process::exit(2);
     }
     let code = match mode.as_deref() {
-        Some("--restore") | Some("--run") => run(),
+        Some("--restore") => run(true),
+        Some("--run") => run(false),
         _ => 2,
     };
     std::process::exit(code);
@@ -45,8 +47,14 @@ fn sticks(bus: &mut dyn Bus) -> Vec<StickInfo> {
         .collect()
 }
 
-fn run() -> i32 {
+fn run(restore: bool) -> i32 {
     let Ok(Some(_claim)) = system::claim_engine() else { return 3 };
+    // The sticks keep built-in effects through restarts and power-off
+    // (hardware stage 5), and every rewrite saves to their own memory,
+    // so a logon restore only has work to do for custom effects.
+    if restore && !system::load_settings().effect.is_custom() {
+        return 0;
+    }
     let Ok(stop) = system::open_stop_event() else { return 4 };
     let Ok(mut bus) = PawnIoBus::open() else { return 5 };
     let found = sticks(&mut bus);

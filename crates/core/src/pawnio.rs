@@ -80,8 +80,10 @@ impl PawnIoBus {
         let lock_name = wide("Global\\Access_SMBUS.HTP.Method");
         let smbus_lock = unsafe { CreateMutexW(null(), 0, lock_name.as_ptr()) };
         if smbus_lock.is_null() {
+            // Read the error before CloseHandle can overwrite it.
+            let error = unsafe { GetLastError() } as i32;
             unsafe { CloseHandle(device) };
-            return Err(BusError::Os(unsafe { GetLastError() } as i32));
+            return Err(BusError::Os(error));
         }
         let mut bus = PawnIoBus { device, smbus_lock };
         bus.load_module()?;

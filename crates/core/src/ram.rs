@@ -194,7 +194,7 @@ mod tests {
     }
 
     #[test]
-    fn detect_ignores_a_wrong_id_b() {
+    fn detect_ignores_a_wrong_id_a() {
         let mut bus = FakeBus::default();
         bus.regs.insert((0x58, REG_ID_A), 0x99);
         bus.regs.insert((0x58, REG_ID_B), 0x03);
@@ -297,7 +297,7 @@ mod tests {
     }
 
     #[test]
-    fn unanswered_wait_gives_up_after_five_polls_and_continues() {
+    fn unanswered_wait_gives_up_after_every_poll_and_continues() {
         let mut bus = FakeBus { nack_status_reads: u32::MAX, ..Default::default() };
         let settings = Settings { effect: Effect::Static, color1: Rgb(9, 8, 7), ..Settings::default() };
         assert_eq!(apply_builtin(&mut bus, &stick(4), &settings), Ok(()));
