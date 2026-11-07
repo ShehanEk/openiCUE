@@ -18,10 +18,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{VK_ESCAPE, VK_RETURN};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const TIMER_PREVIEW: usize = 1;
-#[allow(dead_code)]
 const TIMER_COST: usize = 2;
 const PREVIEW_MS: u32 = 90;
-#[allow(dead_code)]
 const COST_MS: u32 = 2000;
 const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
 const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
@@ -38,6 +36,7 @@ pub struct App {
     pub layout: Option<Layout>,
     pub start: Instant,
     pub scale: f32,
+    pub last_sample: Option<control::Sample>,
 }
 
 impl App {
@@ -96,6 +95,92 @@ fn pick_color(hwnd: HWND, current: Rgb) -> Option<Rgb> {
     (unsafe { ChooseColorW(&mut dialog) } != 0).then(|| from_colorref(dialog.rgbResult))
 }
 
+/// Shows `message` at once, before a call that blocks for up to a second.
+fn show_now(hwnd: HWND, message: &str) {
+    if let Some(a) = app(hwnd) {
+        a.model.message = message.to_string();
+    }
+    invalidate(hwnd);
+    // SAFETY: plain call on our own window; paints synchronously.
+    unsafe { UpdateWindow(hwnd) };
+}
+
+fn apply(hwnd: HWND) {
+    let Some(a) = app(hwnd) else { return };
+    let settings = a.model.settings;
+    if settings.effect.is_custom() {
+        let result = actions::apply_custom(&settings);
+        let Some(a) = app(hwnd) else { return };
+        match result {
+            Ok(()) => {
+                a.model.running = Some(settings.effect);
+                a.model.live = None;
+                a.last_sample = None;
+                a.model.message = "Running in the background".to_string();
+                // SAFETY: plain call on our own window.
+                unsafe { SetTimer(hwnd, TIMER_COST, COST_MS, None) };
+            }
+            Err(e) => a.model.message = e,
+        }
+        return;
+    }
+    show_now(hwnd, "Applying…");
+    let Some(a) = app(hwnd) else { return };
+    let Some(hardware) = a.hardware.as_mut() else { return };
+    let result = hardware.apply_builtin(&settings);
+    match result {
+        Ok(()) => {
+            a.model.running = None;
+            a.model.live = None;
+            a.model.message = "Applied. You can close this window".to_string();
+            // SAFETY: plain call on our own window.
+            unsafe { KillTimer(hwnd, TIMER_COST) };
+        }
+        Err(e) => a.model.message = e,
+    }
+}
+
+fn stop(hwnd: HWND) {
+    let result = actions::stop();
+    let Some(a) = app(hwnd) else { return };
+    match result {
+        Ok(()) => {
+            a.model.running = None;
+            a.model.live = None;
+            a.model.message = "Background process stopped".to_string();
+            // SAFETY: plain call on our own window.
+            unsafe { KillTimer(hwnd, TIMER_COST) };
+        }
+        Err(e) => a.model.message = e,
+    }
+}
+
+/// Every 2 s while an effect runs: measure the engine and remember the cost.
+fn sample_cost(hwnd: HWND) {
+    let Some(a) = app(hwnd) else { return };
+    let Some(effect) = a.model.running else { return };
+    match control::sample_engine() {
+        None => {
+            // The engine exited by itself, for example after repeated bus errors.
+            a.model.running = None;
+            a.model.live = None;
+            a.model.message = "Background process stopped".to_string();
+            // SAFETY: plain call on our own window.
+            unsafe { KillTimer(hwnd, TIMER_COST) };
+        }
+        Some(sample) => {
+            if let Some(previous) = a.last_sample {
+                let processors = std::thread::available_parallelism().map_or(1, |n| n.get());
+                let cost = control::cost_between(&previous, &sample, processors);
+                a.model.live = Some(cost);
+                a.model.costs.set(effect, cost);
+                let _ = system::save_costs(&a.model.costs);
+            }
+            a.last_sample = Some(sample);
+        }
+    }
+}
+
 fn click(hwnd: HWND, target: Target) {
     match target {
         Target::Close => {
@@ -117,8 +202,8 @@ fn click(hwnd: HWND, target: Target) {
                 a.check();
             }
         }
-        // Task 8 wires these to the hardware.
-        Target::Apply | Target::Stop => {}
+        Target::Apply => apply(hwnd),
+        Target::Stop => stop(hwnd),
         other => {
             let Some(a) = app(hwnd) else { return };
             match other {
@@ -179,6 +264,9 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
         WM_ERASEBKGND => 1,
         WM_TIMER => {
             if wparam == TIMER_PREVIEW {
+                invalidate(hwnd);
+            } else if wparam == TIMER_COST {
+                sample_cost(hwnd);
                 invalidate(hwnd);
             }
             0
@@ -263,6 +351,7 @@ pub fn run() -> i32 {
             layout: None,
             start: Instant::now(),
             scale: 1.0,
+            last_sample: None,
         });
         let raw = Box::into_raw(app);
         (*raw).check();
@@ -277,6 +366,9 @@ pub fn run() -> i32 {
             // double free. The process exits right after.
             GdiplusShutdown(token);
             return 1;
+        }
+        if (*raw).model.running.is_some() {
+            SetTimer(hwnd, TIMER_COST, COST_MS, None);
         }
 
         let scale = GetDpiForWindow(hwnd) as f32 / 96.0;
