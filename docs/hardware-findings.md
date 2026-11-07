@@ -76,7 +76,8 @@ Commands (admin terminal): `hwtest save breathing`, `Start-Process openicue-engi
 - **Restore:** `hwtest save rainbow-wave`, then `engine --restore`, exits 0 and applies the effect.
 - **After a restart:** in a fresh admin Command Prompt, `start /wait "" target\release\openicue-engine.exe --restore` exits 0. Pass.
 - **Non-admin terminal:** the engine exits 3 and never reaches the driver. That's correct: it fails closed. Exit code 3 covers both "another engine running" and "lock creation failed", so it should be split.
-- **Built-in effect after restart and after power-off, before any restore:** not recorded yet.
+- **Built-in effect after a restart, and after a full power-off with 30 s unplugged:** Rainbow wave both times, before any restore ran. **The sticks keep built-in effects themselves.**
+- **What this means for restore:** `--restore` is only needed for custom effects. For a built-in effect it just rewrites the same settings, costing about 0.5 s and a save to each stick's own memory at every logon. Plan 3 should skip the rewrite when the saved effect is built-in (open decision).
 
 ## 2026-11-07: Stage 6, driver
 
