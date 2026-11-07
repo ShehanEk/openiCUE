@@ -2,6 +2,7 @@
 use crate::config;
 use crate::costs::{self, Costs};
 use crate::effects::Settings;
+use crate::order::{self, StickOrder};
 use std::ffi::OsString;
 use std::io::Read;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -304,6 +305,18 @@ pub fn load_costs() -> Costs {
 pub fn save_costs(costs: &Costs) -> Result<(), u32> {
     let path = secure_data_dir()?.join("costs.txt");
     std::fs::write(path, costs::serialize(costs)).map_err(os_error)
+}
+
+/// The saved stick order, or `None` if there is none or it can't be trusted.
+/// Callers check it `fits` the sticks found.
+pub fn load_order() -> Option<StickOrder> {
+    let path = secure_data_dir().ok()?.join("order.txt");
+    order::parse(&read_limited(std::fs::File::open(path).ok()?)?)
+}
+
+pub fn save_order(stick_order: &StickOrder) -> Result<(), u32> {
+    let path = secure_data_dir()?.join("order.txt");
+    std::fs::write(path, order::serialize(stick_order)).map_err(os_error)
 }
 
 pub struct StopEvent {

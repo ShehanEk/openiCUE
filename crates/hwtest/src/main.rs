@@ -1,5 +1,6 @@
 use openicue_core::bus::{Bus, BusError, StickAddr};
 use openicue_core::effects::{Effect, Rgb, Settings, ALL_EFFECTS};
+use openicue_core::order::StickOrder;
 use openicue_core::{pawnio::PawnIoBus, ram, system};
 use std::process::exit;
 
@@ -103,14 +104,17 @@ fn sync(bus: &mut dyn Bus, chosen: Effect) {
     };
     let infos: Vec<ram::StickInfo> = ram::detect(bus).into_iter().filter_map(|a| ram::read_info(bus, a).ok()).collect();
     let settings = Settings { effect: chosen, ..Settings::default() }.normalized();
+    // Frame row `p` goes to the stick in slot `p`, as in the engine.
+    let order = StickOrder::or_identity(system::load_order(), infos.len());
+    let targets = order.frame_targets(openicue_core::frames::STICKS_IN_FRAME);
     println!("Drawing {} in sync on {} sticks for {} s...", chosen.name(), infos.len(), SYNC_TEST.as_secs());
     let start = std::time::Instant::now();
     let mut failures = 0;
     while start.elapsed() < SYNC_TEST {
         let frame_start = std::time::Instant::now();
         let frame = openicue_core::frames::render(&settings, start.elapsed().as_secs_f32());
-        for (info, leds) in infos.iter().zip(frame.iter()) {
-            if ram::write_direct(bus, info, leds).is_err() {
+        for &(row, stick) in &targets {
+            if ram::write_direct(bus, &infos[stick], &frame[row]).is_err() {
                 failures += 1;
             }
         }

@@ -17,6 +17,7 @@ use openicue_core::bus::Bus;
 use openicue_core::effects::{Rgb, Settings};
 use openicue_core::pawnio::PawnIoBus;
 use openicue_core::ram::{self, StickInfo, LED_COUNT};
+use openicue_core::order::StickOrder;
 use openicue_core::{frames, system};
 
 /// 10 frames per second (user choice, 2026-11-06). Each stick write keeps the
@@ -73,7 +74,9 @@ fn run(restore: bool) -> i32 {
     }
     let settings = system::load_settings();
     if settings.runs_in_software() {
-        animate(&mut bus, &found, &settings, &stop)
+        // The user's slot order if it matches the sticks found, else address order.
+        let order = StickOrder::or_identity(system::load_order(), found.len());
+        animate(&mut bus, &found, &order, &settings, &stop)
     } else {
         // Try every stick, even after one fails.
         // All sticks at once, so their animations start in sync.
@@ -89,10 +92,13 @@ fn note_write(failures_in_a_row: &mut u32, ok: bool) -> bool {
 }
 
 /// Draws custom effects, and built-ins kept in sync, from one clock.
-/// Only the first `frames::STICKS_IN_FRAME` (4) detected sticks animate,
-/// because a frame holds colors for 4 sticks; the `zip` drops the rest.
-fn animate(bus: &mut dyn Bus, found: &[StickInfo], settings: &Settings, stop: &system::StopEvent) -> i32 {
+/// Frame row `p` goes to the stick in physical slot `p`. Only the first
+/// `frames::STICKS_IN_FRAME` (4) slots animate, because a frame holds colors
+/// for 4 sticks. `order` must fit `found`.
+fn animate(bus: &mut dyn Bus, found: &[StickInfo], order: &StickOrder, settings: &Settings, stop: &system::StopEvent) -> i32 {
     let start = std::time::Instant::now();
+    let targets = order.frame_targets(frames::STICKS_IN_FRAME);
+    // Both are per physical stick, indexed like `found`.
     let mut failures = vec![0u32; found.len()];
     // The colors each stick last accepted. A stick whose colors haven't
     // changed is skipped, since every write costs CPU time.
@@ -101,14 +107,14 @@ fn animate(bus: &mut dyn Bus, found: &[StickInfo], settings: &Settings, stop: &s
         let frame_start = std::time::Instant::now();
         let seconds = (start.elapsed().as_secs_f64() % ANIMATION_PERIOD_SECONDS) as f32;
         let frame = frames::render(settings, seconds);
-        let sticks = found.iter().zip(frame.iter()).zip(failures.iter_mut()).zip(shown.iter_mut());
-        for (((stick, leds), count), last) in sticks {
-            if !needs_write(last, leds) {
+        for &(row, stick) in &targets {
+            let leds = &frame[row];
+            if !needs_write(&shown[stick], leds) {
                 continue;
             }
-            let ok = ram::write_direct(bus, stick, leds).is_ok();
-            *last = ok.then_some(*leds);
-            if note_write(count, ok) {
+            let ok = ram::write_direct(bus, &found[stick], leds).is_ok();
+            shown[stick] = ok.then_some(*leds);
+            if note_write(&mut failures[stick], ok) {
                 return 8;
             }
         }

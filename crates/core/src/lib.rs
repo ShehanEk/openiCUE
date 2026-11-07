@@ -5,6 +5,7 @@ pub mod costs;
 pub mod crc;
 pub mod effects;
 pub mod frames;
+pub mod order;
 pub mod pawnio;
 pub mod ram;
 pub mod system;

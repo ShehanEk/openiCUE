@@ -215,6 +215,21 @@ pub fn write_direct(bus: &mut dyn Bus, stick: &StickInfo, leds: &[Rgb; LED_COUNT
     Ok(())
 }
 
+/// Lights `sticks[lit]` white and every other stick black, so the user can
+/// see which slot it is in. Direct writes only: no commit, nothing saved.
+/// Tries every stick and returns the first error.
+pub fn light_only(bus: &mut dyn Bus, sticks: &[StickInfo], lit: usize) -> Result<(), RamError> {
+    let mut result = Ok(());
+    for (index, stick) in sticks.iter().enumerate() {
+        let color = if index == lit { Rgb(255, 255, 255) } else { Rgb(0, 0, 0) };
+        let written = write_direct(bus, stick, &[color; LED_COUNT]);
+        if result.is_ok() {
+            result = written;
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,6 +548,37 @@ mod tests {
 
     /// CRC-8 (poly 0x07, init 0) of bytes 0-30, computed independently outside this crate.
     const DIRECT_CRC: u8 = 0x7C;
+
+    /// The stick-order picker: one stick white, every other one black, with
+    /// direct writes only, so nothing is saved to the sticks' memory.
+    #[test]
+    fn light_only_whitens_one_stick_and_blacks_out_the_rest() {
+        let sticks: Vec<StickInfo> = [0x58, 0x59, 0x5A]
+            .iter()
+            .map(|&a| StickInfo { addr: addr(a), product_id: 0x0101, protocol: 4 })
+            .collect();
+        let mut bus = FakeBus::default();
+        light_only(&mut bus, &sticks, 1).unwrap();
+        let block = |value: u8| {
+            let mut data = vec![10u8];
+            data.extend([value; 30]);
+            data.push(crate::crc::crc8(&data));
+            data
+        };
+        assert_eq!(bus.ops, vec![
+            Op::Block(0x58, 0x31, block(0)),
+            Op::Block(0x59, 0x31, block(255)),
+            Op::Block(0x5A, 0x31, block(0)),
+        ]);
+    }
+
+    #[test]
+    fn light_only_tries_every_stick_and_reports_a_failure() {
+        let sticks = [stick(3), StickInfo { addr: addr(0x59), product_id: 0x0101, protocol: 4 }];
+        let mut bus = FakeBus::default();
+        assert_eq!(light_only(&mut bus, &sticks, 1), Err(RamError::ProtocolTooOld(3)));
+        assert_eq!(bus.ops.len(), 1, "the second stick is still written");
+    }
 
     #[test]
     fn direct_write_needs_protocol_4() {
