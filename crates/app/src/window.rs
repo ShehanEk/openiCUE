@@ -63,8 +63,8 @@ impl App {
 /// Matches `running` and the cost timer to whether an engine holds its claim.
 /// The engine runs the saved effect, which may differ from the one on screen.
 fn sync_running(hwnd: HWND) {
-    let saved = system::load_settings().effect;
-    let running = (control::engine_running() && saved.is_custom()).then_some(saved);
+    let saved = system::load_settings();
+    let running = (control::engine_running() && saved.runs_in_software()).then_some(saved.effect);
     let Some(a) = app(hwnd) else { return };
     if running != a.model.running {
         a.model.live = None;
@@ -140,7 +140,7 @@ fn finish(hwnd: HWND, result: Result<(), String>, ok_message: &str) {
 fn apply(hwnd: HWND) {
     let Some(a) = app(hwnd) else { return };
     let settings = a.model.settings;
-    if settings.effect.is_custom() {
+    if settings.runs_in_software() {
         show_now(hwnd, "Starting…");
         let result = actions::apply_custom(&settings);
         finish(hwnd, result, "Running in the background");
@@ -220,6 +220,7 @@ fn click(hwnd: HWND, target: Target) {
                 Target::Speed(s) => a.model.set_speed(s),
                 Target::Direction(d) => a.model.set_direction(d),
                 Target::Random => a.model.toggle_random(),
+                Target::Sync => a.model.toggle_sync(),
                 _ => {}
             }
         }

@@ -55,6 +55,8 @@ pub enum Target {
     Effect(Effect),
     Color(u8),
     Random,
+    /// "Keep sticks in sync", in the settings header.
+    Sync,
     Speed(Speed),
     Direction(Direction),
     Stop,
@@ -149,29 +151,33 @@ pub fn layout(model: &Model, measure: &dyn Fn(&str, Font) -> f32) -> Layout {
     out.preview = Some(preview);
     let mut y = preview.y + preview.h + 28.0;
 
+    // A running effect's tile has room for its dot. Built-ins kept in sync run too.
+    let tile = |e| {
+        let dot = if model.running == Some(e) { 15.0 } else { 0.0 };
+        (Target::Effect(e), 36.0 + dot + measure(model::display_name(e), Font::Body))
+    };
     out.builtin_label = Some(Rect { x: SIDE, y, w: 300.0, h: 16.0 });
-    let tiles: Vec<(Target, f32)> = model::builtins()
-        .into_iter()
-        .map(|e| (Target::Effect(e), 36.0 + measure(model::display_name(e), Font::Body)))
-        .collect();
+    let tiles: Vec<(Target, f32)> = model::builtins().into_iter().map(tile).collect();
     y = flow(&mut out.buttons, &tiles, y + 24.0) + 16.0;
 
     out.custom_label = Some(Rect { x: SIDE, y, w: 300.0, h: 16.0 });
-    let tiles: Vec<(Target, f32)> = model::customs()
-        .into_iter()
-        .map(|e| {
-            let dot = if model.running == Some(e) { 15.0 } else { 0.0 };
-            (Target::Effect(e), 36.0 + dot + measure(model::display_name(e), Font::Body))
-        })
-        .collect();
-    y = flow(&mut out.buttons, &tiles, y + 24.0) + 24.0;
+    let tiles: Vec<(Target, f32)> = model::customs().into_iter().map(tile).collect();
+    y = flow(&mut out.buttons, &tiles, y + 24.0) + 20.0;
 
     // The selected effect's settings, set apart from the tiles (user feedback,
     // 2026-11-07: without this they read as belonging to the background effects).
     out.divider = Some(Rect { x: SIDE, y, w: CONTENT_RIGHT - SIDE, h: 1.0 });
-    y += 20.0;
-    out.settings_label = Some(Rect { x: SIDE, y, w: 400.0, h: 16.0 });
-    y += 24.0;
+    y += 1.0 + 8.0;
+    // Header row: "<effect> settings" on the left, the sync checkbox on the right.
+    let mut label_right = SIDE + 400.0;
+    if model.show_sync() {
+        let w = 8.0 + 15.0 + 8.0 + measure("Keep sticks in sync", Font::Body) + 8.0;
+        let rect = Rect { x: CONTENT_RIGHT - w, y, w, h: PILL_H };
+        out.buttons.push(Button { rect, target: Target::Sync });
+        label_right = label_right.min(rect.x - 8.0);
+    }
+    out.settings_label = Some(Rect { x: SIDE, y, w: label_right - SIDE, h: PILL_H });
+    y += PILL_H + 8.0;
 
     // Options row.
     let mut x = SIDE;
@@ -307,6 +313,25 @@ mod tests {
         assert_eq!(t.iter().filter(|t| matches!(t, Target::Speed(_))).count(), 3);
         assert_eq!(t.iter().filter(|t| matches!(t, Target::Direction(_))).count(), 4);
         assert!(t.contains(&Target::Apply) && !t.contains(&Target::Stop));
+    }
+
+    #[test]
+    fn sync_sits_in_the_settings_header_for_animated_built_ins_only() {
+        for (effect, shown) in [(Effect::ColorWave, true), (Effect::Static, false), (Effect::Breathing, false)] {
+            let l = layout(&app(effect), &measure);
+            let sync = l.buttons.iter().find(|b| b.target == Target::Sync);
+            assert_eq!(sync.is_some(), shown, "{effect:?}");
+            let Some(sync) = sync else { continue };
+            let (divider, label) = (l.divider.unwrap(), l.settings_label.unwrap());
+            assert!(sync.rect.y > divider.y && sync.rect.right() == CONTENT_RIGHT);
+            assert_eq!((sync.rect.y, sync.rect.h), (label.y, label.h), "same row as the label");
+            assert!(label.right() <= sync.rect.x, "label runs into the checkbox");
+            for b in l.buttons.iter().filter(|b| b.target != Target::Sync) {
+                let apart = sync.rect.right() <= b.rect.x || b.rect.right() <= sync.rect.x
+                    || sync.rect.y + sync.rect.h <= b.rect.y || b.rect.y + b.rect.h <= sync.rect.y;
+                assert!(apart, "Sync overlaps {:?}", b.target);
+            }
+        }
     }
 
     #[test]

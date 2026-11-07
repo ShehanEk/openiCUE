@@ -56,7 +56,8 @@ impl Hardware {
 const START_TIMEOUT: Duration = Duration::from_secs(1);
 const START_POLL: Duration = Duration::from_millis(50);
 
-/// Saves the effect, then starts a fresh engine and waits until it is really
+/// For effects drawn in software (custom, or built-ins kept in sync): saves the
+/// effect, then starts a fresh engine and waits until it is really
 /// running, since the process can exit at once (codes 3, 5, 6, 9).
 pub fn apply_custom(settings: &Settings) -> Result<(), String> {
     const NOT_STARTED: &str = "The background process didn't start. Try again.";

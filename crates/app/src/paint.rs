@@ -276,6 +276,21 @@ impl Painter {
         self.text(g, label, font, r, if on { BG } else { PILL_TEXT }, 1);
     }
 
+    /// A 15 px box, ticked when `on`, then its label.
+    fn checkbox(&self, g: *mut GpGraphics, r: Rect, label: &str, on: bool) {
+        let bx = Rect { x: r.x + 8.0, y: r.y + r.h / 2.0 - 7.5, w: 15.0, h: 15.0 };
+        if on {
+            self.rounded(g, bx, 3.0, FG);
+            self.line(g, BG, 1.6, &[(bx.x + 3.5, bx.y + 7.5), (bx.x + 6.5, bx.y + 10.5), (bx.x + 11.5, bx.y + 4.5)]);
+        } else {
+            self.rounded(g, bx, 3.0, PILL_TEXT);
+            let hole = Rect { x: bx.x + 1.0, y: bx.y + 1.0, w: 13.0, h: 13.0 };
+            self.rounded(g, hole, 2.0, BG);
+        }
+        let text = Rect { x: bx.right() + 8.0, y: r.y, w: r.right() - bx.right() - 8.0, h: r.h };
+        self.text(g, label, Font::Body, text, PILL_TEXT, 0);
+    }
+
     fn button(&self, g: *mut GpGraphics, model: &Model, r: Rect, target: Target) {
         let s = &model.settings;
         match target {
@@ -298,19 +313,8 @@ impl Painter {
                 let inner = Rect { x: swatch.x + 1.0, y: swatch.y + 1.0, w: 26.0, h: 26.0 };
                 self.rounded(g, inner, 5.0, argb(color, 0xFF));
             }
-            Target::Random => {
-                let bx = Rect { x: r.x + 8.0, y: r.y + r.h / 2.0 - 7.5, w: 15.0, h: 15.0 };
-                if s.random {
-                    self.rounded(g, bx, 3.0, FG);
-                    self.line(g, BG, 1.6, &[(bx.x + 3.5, bx.y + 7.5), (bx.x + 6.5, bx.y + 10.5), (bx.x + 11.5, bx.y + 4.5)]);
-                } else {
-                    self.rounded(g, bx, 3.0, PILL_TEXT);
-                    let hole = Rect { x: bx.x + 1.0, y: bx.y + 1.0, w: 13.0, h: 13.0 };
-                    self.rounded(g, hole, 2.0, BG);
-                }
-                let label = Rect { x: bx.right() + 8.0, y: r.y, w: r.right() - bx.right() - 8.0, h: r.h };
-                self.text(g, "Random", Font::Body, label, PILL_TEXT, 0);
-            }
+            Target::Random => self.checkbox(g, r, "Random", s.random),
+            Target::Sync => self.checkbox(g, r, "Keep sticks in sync", s.synced),
             Target::Speed(v) => {
                 if s.speed == v { self.rounded(g, r, 20.0, FG); }
                 self.text(g, model::speed_name(v), Font::Segment, r, if s.speed == v { BG } else { PILL_TEXT }, 1);

@@ -65,10 +65,10 @@ pub struct Model {
     pub sticks: usize,
     /// The choice on screen. Always normalized, so it can be applied as is.
     pub settings: Settings,
-    /// The custom effect the engine is running, if any.
+    /// The effect the engine is drawing in software, if any.
     pub running: Option<Effect>,
     pub costs: Costs,
-    /// The latest sample while the selected custom effect runs.
+    /// The latest sample while the selected effect runs in the background.
     pub live: Option<Cost>,
     /// Overrides the status line until the next selection.
     pub message: String,
@@ -109,6 +109,12 @@ impl Model {
         }
     }
 
+    pub fn toggle_sync(&mut self) {
+        if self.settings.effect.allows_sync() {
+            self.settings.synced = !self.settings.synced;
+        }
+    }
+
     /// `index` is 1 or 2. Anything else is ignored.
     pub fn set_color(&mut self, index: u8, color: Rgb) {
         match index {
@@ -134,6 +140,10 @@ impl Model {
         self.settings.effect.allows_random()
     }
 
+    pub fn show_sync(&self) -> bool {
+        self.settings.effect.allows_sync()
+    }
+
     pub fn show_speed(&self) -> bool {
         self.settings.effect.has_speed()
     }
@@ -147,12 +157,12 @@ impl Model {
     }
 
     pub fn cost_is_ongoing(&self) -> bool {
-        self.settings.effect.is_custom()
+        self.settings.runs_in_software()
     }
 
     pub fn cost_line(&self) -> String {
         let effect = self.settings.effect;
-        if !effect.is_custom() {
+        if !self.settings.runs_in_software() {
             return "0 MB · 0% CPU".to_string();
         }
         if self.is_running_selected() {
@@ -163,7 +173,7 @@ impl Model {
 
     pub fn cost_body(&self) -> &'static str {
         let effect = self.settings.effect;
-        if !effect.is_custom() {
+        if !self.settings.runs_in_software() {
             if self.running.is_some() {
                 "After you close this window. Applying stops the background process."
             } else {
@@ -179,7 +189,7 @@ impl Model {
     }
 
     pub fn apply_label(&self) -> &'static str {
-        if self.settings.effect.is_custom() && self.is_running_selected() { "Update" } else { "Apply" }
+        if self.settings.runs_in_software() && self.is_running_selected() { "Update" } else { "Apply" }
     }
 
     pub fn show_stop(&self) -> bool {
@@ -293,6 +303,45 @@ mod tests {
 
         m.live = None;
         assert_eq!(m.cost_line(), "Measuring…");
+    }
+
+    #[test]
+    fn sync_toggle_shows_only_for_animated_built_ins() {
+        for (effect, shown) in [(Effect::ColorWave, true), (Effect::Static, false), (Effect::Breathing, false)] {
+            let mut m = model(effect);
+            assert_eq!(m.show_sync(), shown, "{effect:?}");
+            m.toggle_sync();
+            assert_eq!(m.settings.synced, shown, "{effect:?}");
+        }
+        let mut m = model(Effect::ColorWave);
+        m.toggle_sync();
+        m.toggle_sync();
+        assert!(!m.settings.synced);
+        m.toggle_sync();
+        m.select(Effect::Static);
+        assert!(!m.settings.synced, "select drops sync where it isn't allowed");
+    }
+
+    #[test]
+    fn synced_built_in_costs_like_a_custom_effect() {
+        let mut m = model(Effect::ColorWave);
+        m.toggle_sync();
+        assert!(m.cost_is_ongoing());
+        assert_eq!(m.cost_line(), "Not measured yet");
+        assert_eq!(m.cost_body(), "Keeps running after you close this window. Apply it to see the real cost.");
+        assert_eq!(m.apply_label(), "Apply");
+
+        m.running = Some(Effect::ColorWave);
+        m.live = Some(Cost { mb: 1.2, cpu: 0.7 });
+        assert_eq!(m.cost_line(), "1.2 MB · 0.7% CPU");
+        assert_eq!(m.cost_body(), "Using this now, until you stop it or shut down.");
+        assert_eq!(m.apply_label(), "Update");
+
+        m.toggle_sync();
+        assert!(!m.cost_is_ongoing());
+        assert_eq!(m.cost_line(), "0 MB · 0% CPU");
+        assert_eq!(m.cost_body(), "After you close this window. Applying stops the background process.");
+        assert_eq!(m.apply_label(), "Apply");
     }
 
     #[test]
