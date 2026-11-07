@@ -115,3 +115,7 @@ The window (`target\release\openicue.exe`, commit `4bfd399`) ran through the 6 c
 - **Conclusion:** built-in effects run in sync only by chance. In-sync lighting needs software-driven effects, which cost about 1.5 MB and 0.8% CPU.
 - **Software sync test (`076b466`, `hwtest sync color-pulse`):** Color pulse drawn in software from one clock with direct writes at 10 fps keeps all 4 sticks in sync and looks right (user, 2026-11-08). This is the way to offer synced built-in effects.
 - **All built-in effects in software (2026-11-08):** `hwtest sync` for color-shift, rainbow-wave, color-wave, visor, rain, marquee, rainbow and sequential. The user reports all of them OK and in sync.
+- **"Keep sticks in sync" toggle (`eb56a80`, `be50901`, user test 2026-11-08):** all checks passed.
+  - **On:** Color pulse runs in software with all sticks in sync, the cost is shown live, and the Stop button appears.
+  - **Off:** the RAM runs Color pulse itself at 0 MB · 0% CPU, and the background process stops.
+  - **Static:** shows no toggle.
