@@ -3,6 +3,14 @@
 version = 4
 
 [[package]]
+name = "openicue"
+version = "0.1.0"
+dependencies = [
+ "openicue-core",
+ "windows-sys",
+]
+
+[[package]]
 name = "openicue-core"
 version = "0.1.0"
 dependencies = [
