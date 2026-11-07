@@ -6,13 +6,17 @@ use std::process::exit;
 /// NTSTATUS STATUS_ACCESS_DENIED, as `NtOpenFile` returns it.
 const STATUS_ACCESS_DENIED: i32 = 0xC000_0022_u32 as i32;
 
-const USAGE: &str = "usage: openicue-hwtest detect | info | one <58-5F> | effect <name> | save <name> | stop";
+const USAGE: &str = "usage: openicue-hwtest detect | info | one <58-5F> | effect <name> | sync <name> | save <name> | stop";
+/// How long the `sync` test draws before it stops.
+const SYNC_TEST: std::time::Duration = std::time::Duration::from_secs(30);
+const SYNC_FRAME: std::time::Duration = std::time::Duration::from_millis(100);
 
 enum Command {
     Detect,
     Info,
     One(StickAddr),
     Effect(Effect),
+    Sync(Effect),
     Save(Effect),
     Stop,
 }
@@ -44,6 +48,7 @@ fn main() {
         Command::Info => info(&mut bus),
         Command::One(addr) => one_stick(&mut bus, addr),
         Command::Effect(chosen) => effect(&mut bus, chosen),
+        Command::Sync(chosen) => sync(&mut bus, chosen),
         Command::Save(_) | Command::Stop => unreachable!("handled before the driver opens"),
     }
 }
@@ -66,6 +71,14 @@ fn parse(args: &[&str]) -> Result<Command, String> {
                     ALL_EFFECTS.iter().filter(|e| !e.is_custom()).map(|e| e.name()).collect();
                 format!("unknown effect. Choose from {names:?}")
             }),
+        ["sync", name] => Effect::from_name(name)
+            .filter(|e| !e.is_custom())
+            .map(Command::Sync)
+            .ok_or_else(|| {
+                let names: Vec<&str> =
+                    ALL_EFFECTS.iter().filter(|e| !e.is_custom()).map(|e| e.name()).collect();
+                format!("unknown effect. Choose from {names:?}")
+            }),
         ["save", name] => Effect::from_name(name).map(Command::Save).ok_or_else(|| {
             let names: Vec<&str> = ALL_EFFECTS.iter().map(|e| e.name()).collect();
             format!("unknown effect. Choose from {names:?}")
@@ -73,6 +86,37 @@ fn parse(args: &[&str]) -> Result<Command, String> {
         ["stop"] => Ok(Command::Stop),
         _ => Err(USAGE.to_string()),
     }
+}
+
+/// Test: draws a built-in effect in software on every stick from one clock,
+/// like the engine's custom effects, for 30 s. Holds the engine claim so no
+/// other openiCUE process writes meanwhile. Direct writes don't commit, so
+/// nothing is saved to the sticks' memory.
+fn sync(bus: &mut dyn Bus, chosen: Effect) {
+    if openicue_core::control::stop_engine(std::time::Duration::from_secs(2)).is_err() {
+        eprintln!("The background engine didn't stop. Nothing written.");
+        exit(1);
+    }
+    let Ok(Some(_claim)) = system::claim_engine() else {
+        eprintln!("Another openiCUE process is using the RAM. Nothing written.");
+        exit(1);
+    };
+    let infos: Vec<ram::StickInfo> = ram::detect(bus).into_iter().filter_map(|a| ram::read_info(bus, a).ok()).collect();
+    let settings = Settings { effect: chosen, ..Settings::default() }.normalized();
+    println!("Drawing {} in sync on {} sticks for {} s...", chosen.name(), infos.len(), SYNC_TEST.as_secs());
+    let start = std::time::Instant::now();
+    let mut failures = 0;
+    while start.elapsed() < SYNC_TEST {
+        let frame_start = std::time::Instant::now();
+        let frame = openicue::preview::colors(&settings, start.elapsed().as_secs_f32());
+        for (info, leds) in infos.iter().zip(frame.iter()) {
+            if ram::write_direct(bus, info, leds).is_err() {
+                failures += 1;
+            }
+        }
+        std::thread::sleep(SYNC_FRAME.saturating_sub(frame_start.elapsed()));
+    }
+    println!("Done, {failures} failed writes. The sticks keep the last frame until you apply an effect.");
 }
 
 /// Saves the effect, with default options, for the engine to use.

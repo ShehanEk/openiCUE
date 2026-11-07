@@ -5,3 +5,5 @@ edition = "2021"
 
 [dependencies]
 openicue-core = { path = "../core" }
+# For the `sync` test only: the window's preview drawing of built-in effects.
+openicue = { path = "../app" }

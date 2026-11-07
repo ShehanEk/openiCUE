@@ -28,6 +28,7 @@ dependencies = [
 name = "openicue-hwtest"
 version = "0.1.0"
 dependencies = [
+ "openicue",
  "openicue-core",
 ]
 
