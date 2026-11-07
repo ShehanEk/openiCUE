@@ -84,3 +84,7 @@ Commands (admin terminal): `hwtest save breathing`, `Start-Process openicue-engi
 - **Status:** `Win32_SystemDriver` shows PawnIO as `StartMode: Manual`, `State: Running`. It's still loaded after our process exited, so the driver stays loaded until reboot once something has opened it.
 - **Size:** `PawnIO.sys` is 133 KB on disk.
 - **Non-paged pool use:** not measured (needs RAMMap or poolmon). Since the driver stays loaded, the app's "0 MB" label for built-in effects must clearly mean openiCUE's own processes, not the driver.
+
+## 2026-11-07: Dependency scan
+
+`cargo audit` (cargo-audit 0.22.2, 1,422 advisories) scanned the 13 crates in `Cargo.lock`: no vulnerabilities, exit code 0.
