@@ -113,3 +113,4 @@ The window (`target\release\openicue.exe`, commit `4bfd399`) ran through the 6 c
   - Users report the same drift under iCUE's hardware playback.
   - iCUE's synced lighting most likely streams colours from software (direct mode), as openiCUE's custom effects do.
 - **Conclusion:** built-in effects run in sync only by chance. In-sync lighting needs software-driven effects, which cost about 1.5 MB and 0.8% CPU.
+- **Software sync test (`076b466`, `hwtest sync color-pulse`):** Color pulse drawn in software from one clock with direct writes at 10 fps keeps all 4 sticks in sync and looks right (user, 2026-11-08). This is the way to offer synced built-in effects.
