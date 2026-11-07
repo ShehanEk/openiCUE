@@ -77,6 +77,10 @@ pub struct Layout {
     pub preview: Option<Rect>,
     pub builtin_label: Option<Rect>,
     pub custom_label: Option<Rect>,
+    /// A 1 px line between the effect tiles and the selected effect's settings.
+    pub divider: Option<Rect>,
+    /// "<effect> settings", so the options read as belonging to the selection.
+    pub settings_label: Option<Rect>,
     /// Backgrounds of the speed and direction groups.
     pub segment_groups: Vec<Rect>,
     pub cost_line: Option<Rect>,
@@ -120,6 +124,8 @@ pub fn layout(model: &Model, measure: &dyn Fn(&str, Font) -> f32) -> Layout {
         preview: None,
         builtin_label: None,
         custom_label: None,
+        divider: None,
+        settings_label: None,
         segment_groups: Vec::new(),
         cost_line: None,
         cost_body: None,
@@ -158,7 +164,14 @@ pub fn layout(model: &Model, measure: &dyn Fn(&str, Font) -> f32) -> Layout {
             (Target::Effect(e), 36.0 + dot + measure(model::display_name(e), Font::Body))
         })
         .collect();
-    y = flow(&mut out.buttons, &tiles, y + 24.0) + 20.0;
+    y = flow(&mut out.buttons, &tiles, y + 24.0) + 24.0;
+
+    // The selected effect's settings, set apart from the tiles (user feedback,
+    // 2026-11-07: without this they read as belonging to the background effects).
+    out.divider = Some(Rect { x: SIDE, y, w: CONTENT_RIGHT - SIDE, h: 1.0 });
+    y += 20.0;
+    out.settings_label = Some(Rect { x: SIDE, y, w: 400.0, h: 16.0 });
+    y += 24.0;
 
     // Options row.
     let mut x = SIDE;
@@ -258,6 +271,27 @@ mod tests {
                     let apart = a.rect.right() <= b.rect.x || b.rect.right() <= a.rect.x
                         || a.rect.y + a.rect.h <= b.rect.y || b.rect.y + b.rect.h <= a.rect.y;
                     assert!(apart, "{:?} overlaps {:?}", a.target, b.target);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn settings_sit_below_a_divider_under_every_tile() {
+        for effect in openicue_core::effects::ALL_EFFECTS {
+            let mut m = app(effect);
+            m.running = Some(Effect::Chase);
+            for l in [layout(&m, &measure), layout(&m, &|t: &str, _: Font| t.chars().count() as f32 * 14.0)] {
+                let divider = l.divider.unwrap();
+                let label = l.settings_label.unwrap();
+                let tiles_bottom = l.buttons.iter()
+                    .filter(|b| matches!(b.target, Target::Effect(_)))
+                    .map(|b| b.rect.y + b.rect.h).fold(0.0, f32::max);
+                assert!(divider.y > tiles_bottom && label.y > divider.y);
+                for b in l.buttons.iter().filter(|b| matches!(b.target,
+                    Target::Color(_) | Target::Random | Target::Speed(_) | Target::Direction(_))) {
+                    assert!(b.rect.y > label.y + label.h, "{:?} above its label", b.target);
+                    assert!(b.rect.y + b.rect.h <= l.cost_line.unwrap().y, "{:?} hits the cost", b.target);
                 }
             }
         }

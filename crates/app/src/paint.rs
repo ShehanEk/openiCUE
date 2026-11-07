@@ -18,6 +18,7 @@ const PILL_TEXT: u32 = 0xFFC9CED3;
 const ORANGE: u32 = 0xFFFFB066;
 const DOT_ON_SELECTED: u32 = 0xFFB45A00;
 const SWATCH_EDGE: u32 = 0xFF2A2D33;
+const DIVIDER: u32 = 0xFF1E2126;
 
 fn argb(c: Rgb, alpha: u8) -> u32 {
     (u32::from(alpha) << 24) | (u32::from(c.0) << 16) | (u32::from(c.1) << 8) | u32::from(c.2)
@@ -247,6 +248,13 @@ impl Painter {
         }
         if let Some(r) = l.custom_label {
             self.text(g, "In the background", Font::Label, r, ORANGE, 0);
+        }
+        if let Some(r) = l.divider {
+            self.rounded(g, r, 0.0, DIVIDER);
+        }
+        if let Some(r) = l.settings_label {
+            let label = format!("{} settings", model::display_name(model.settings.effect));
+            self.text(g, &label, Font::Label, r, MUTED, 0);
         }
         for group in &l.segment_groups {
             self.rounded(g, *group, 22.0, PILL);
