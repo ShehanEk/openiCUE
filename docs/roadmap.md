@@ -3,7 +3,7 @@
 ## Status (2026-11-08)
 
 - **Plan 1 (core and hardware):** complete. Verified on the target PC; see `hardware-findings.md`.
-- **Plan 2 (window):** code complete and reviewed, 87 tests pass. The user approved the look on 2026-11-07. Waiting on hardware stage 8, the full window test on the RAM.
+- **Plan 2 (window):** complete. Stage 8 passed on 2026-11-08: Breathing costs 1.5 MB · 0.8% CPU.
 - **Plan 3 (installer):** next.
 
 ## Locked decisions

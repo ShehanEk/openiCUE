@@ -96,3 +96,10 @@ Commit `6b68d14`: PawnIO is now opened with `SYNCHRONIZE` and `FILE_SYNCHRONOUS_
 - **`hwtest info`:** all 4 sticks report product `0x0101`, protocol 4, with no `ShortReply`. Pass.
 - **`hwtest effect rainbow-wave`:** `Ok(())` on all 4 sticks. The `reg 0x30` busy lines are the same as before. Pass.
 - **Engine `--restore` from a non-admin Command Prompt:** exit code `9` ("couldn't create the engine lock"). Before this change it was 3. Pass.
+
+## 2026-11-08: Stage 8, the window on the RAM
+
+The window (`target\release\openicue.exe`, commit `4bfd399`) ran through the 6 checks: built-in apply, Static with a picked color, a custom effect with live cost, close and reopen while running, Stop, and switching from a custom effect to a built-in one.
+
+- **Result:** the user reported no failures.
+- **Breathing's live cost in the window:** **1.5 MB · 0.8% CPU**. That's a share of all logical processors, like Task Manager, and matches the stage 4 model (about 13% of one core on this CPU).
