@@ -70,3 +70,16 @@ Commands (admin terminal): `hwtest save breathing`, `Start-Process openicue-engi
   - So there is no fixed overhead. **CPU ≈ stick writes per second x 3.4 ms.**
 - **Levers:** fewer frames per second, or skipping sticks that haven't changed. Not used: raising the SMBus clock, which risks the RAM's SPD and other devices on the bus.
 - **At 10 fps (`4261e91`, the user's choice):** 13% of one core, which matches the model (10 x 4 x 3.4 ms ≈ 13.6%). Private memory 1.4 MB.
+
+## 2026-11-07: Stage 5, restore
+
+- **Restore:** `hwtest save rainbow-wave`, then `engine --restore`, exits 0 and applies the effect.
+- **After a restart:** in a fresh admin Command Prompt, `start /wait "" target\release\openicue-engine.exe --restore` exits 0. Pass.
+- **Non-admin terminal:** the engine exits 3 and never reaches the driver. That's correct: it fails closed. Exit code 3 covers both "another engine running" and "lock creation failed", so it should be split.
+- **Built-in effect after restart and after power-off, before any restore:** not recorded yet.
+
+## 2026-11-07: Stage 6, driver
+
+- **Status:** `Win32_SystemDriver` shows PawnIO as `StartMode: Manual`, `State: Running`. It's still loaded after our process exited, so the driver stays loaded until reboot once something has opened it.
+- **Size:** `PawnIO.sys` is 133 KB on disk.
+- **Non-paged pool use:** not measured (needs RAMMap or poolmon). Since the driver stays loaded, the app's "0 MB" label for built-in effects must clearly mean openiCUE's own processes, not the driver.
