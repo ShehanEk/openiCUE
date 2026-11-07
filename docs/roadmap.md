@@ -1,8 +1,10 @@
 # Roadmap
 
-## Status (2026-11-07)
+## Status (2026-11-08)
 
-Plan 1 (core and hardware) is complete. Everything was verified on the target PC; see `hardware-findings.md`. 58 tests pass and `cargo audit` is clean. Plan 2 (window) and Plan 3 (installer) are next.
+- **Plan 1 (core and hardware):** complete. Verified on the target PC; see `hardware-findings.md`.
+- **Plan 2 (window):** code complete and reviewed, 87 tests pass. The user approved the look on 2026-11-07. Waiting on hardware stage 8, the full window test on the RAM.
+- **Plan 3 (installer):** next.
 
 ## Locked decisions
 
@@ -28,3 +30,9 @@ Plan 1 (core and hardware) is complete. Everything was verified on the target PC
 1. **Settings folder:** if `C:\ProgramData\openiCUE` already exists and fails the admin-only check, remove it without following links and recreate it.
 2. **What to ship:** leave `openicue-hwtest` out.
 3. **Logon task:** it only matters for custom effects (see the locked decisions).
+4. **Install folder:** it must be writable by admins only. The admin window starts `openicue-engine.exe` from its own folder without a UAC prompt, so a swapped file there would run as admin.
+
+## Locked decisions (Plan 2)
+
+- **2026-11-07:** the window's effect settings sit under a divider with a "<effect> settings" label, a user change from the original design. The design canvas is updated to match.
+- **2026-11-07:** CPU % is shown as a share of all logical processors, like Task Manager.
