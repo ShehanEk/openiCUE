@@ -1,5 +1,6 @@
 pub mod bus;
 pub mod config;
+pub mod control;
 pub mod costs;
 pub mod crc;
 pub mod effects;
