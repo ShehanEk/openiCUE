@@ -1594,6 +1594,40 @@ git commit -m "feat: add the Setup window and wire install and uninstall"
 
 ---
 
+### Task 5b: Stick order step in Setup (added 2026-11-08)
+
+**Why:** effects drawn in software need the physical slot order. The user approved Setup asking for it once, right after installing ("Setup: which slot is lit?" board on the design canvas). The window's Settings screen already does the same thing: `core::order::StickOrder`, `system::{load_order, save_order}` and `ram::light_only` exist, and the window's picker model and paint are the reference.
+
+**Files:**
+- Modify: `crates/setup/src/model.rs`, `crates/setup/src/layout.rs`, `crates/setup/src/paint.rs`, `crates/setup/src/window.rs`, `crates/setup/src/install.rs`
+
+**Behaviour:**
+1. **Flow:**
+   - **Install:** after `run_install` reports `Done`, Setup shows the picker (`Screen::Arrange`) instead of `Done`.
+   - **Uninstall:** never shows the picker.
+2. **Before the picker:** open `PawnIoBus`, then `detect` and `read_info` the sticks. Skip straight to `Done` when:
+   - fewer than 2 sticks answer;
+   - the driver can't be opened (for example, PawnIO needs a restart);
+   - a valid order is already saved and fits (a reinstall). The user can still change it later in Settings.
+3. **While the picker is open:**
+   - Hold `system::claim_engine()` and light the current stick with `ram::light_only`.
+   - The screen is "Stick k of n" / "Which slot is lit?", with slots 72 × 150 at Setup size, the same pick logic, and auto-fill of the last stick.
+   - **Buttons:** "Skip" (secondary) while picking. Once done, "Start over" and "Continue".
+   - The hint reads "You can change this later in openiCUE."
+4. **Continue:** `save_order`, release the claim, set every stick black with `light_only`'s black path (or one direct black frame), then show `Done`.
+5. **Skip:** save nothing, release the claim, set the sticks black, then show `Done`.
+
+   Setup doesn't re-apply an effect. The window or the logon task does that.
+6. **Tests:**
+   - Model tests for the new screen: the text, the buttons, picks and auto-fill. Reuse `StickOrder::from_picks`.
+   - Layout tests: slots centred, inside 560 × 440, no overlaps.
+
+**Commit:** `feat: ask the stick order in Setup`.
+
+The Stage 9 Sandbox tests can't reach the RAM, so there the picker is skipped (no sticks). Stage 10 checks it on the real PC.
+
+---
+
 ### Task 6: Windows Sandbox tests (HARDWARE STAGE 9, the user runs them)
 
 Nothing in Sandbox can reach the RAM, so these tests check only Setup. Steps:
@@ -1645,7 +1679,7 @@ git commit -m "docs: record setup sandbox tests"
 
 Only after stage 9 passes.
 
-1. **Install:** run `openiCUE-Setup.exe` and press Install. PawnIO is already installed, so step 3 skips it.
+1. **Install:** run `openiCUE-Setup.exe` and press Install. PawnIO is already installed, so step 3 skips it. If a stick order is already saved, the picker is skipped. Otherwise, pick the slot of each lit stick, then press Continue.
 2. **Open the window** from the Start menu. It must look the same as before Task 1, which confirms the shared drawing code changed nothing.
 3. **Restore at logon:** apply **Breathing**, then restart Windows. Expected: Breathing runs after logon, with no window and no UAC prompt.
 4. **Built-in after restart:** apply **Rainbow wave**, then restart. Expected: rainbow wave shows. The engine doesn't keep running: `Get-Process openicue-engine` finds nothing a minute after logon.
