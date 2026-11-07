@@ -41,14 +41,10 @@ impl Hardware {
         if sticks.is_empty() {
             return Err(BUSY.to_string());
         }
-        let failed = sticks
-            .iter()
-            .filter(|&&addr| {
-                ram::read_info(&mut self.bus, addr)
-                    .and_then(|info| ram::apply_builtin(&mut self.bus, &info, settings))
-                    .is_err()
-            })
-            .count();
+        let infos: Vec<ram::StickInfo> = sticks.iter().filter_map(|&addr| ram::read_info(&mut self.bus, addr).ok()).collect();
+        // All sticks at once, so their animations start in sync.
+        let applied = ram::apply_builtin_all(&mut self.bus, &infos, settings).iter().filter(|r| r.is_ok()).count();
+        let failed = sticks.len() - applied;
         if failed > 0 {
             return Err(format!("{failed} of {} sticks didn't take it. Close other RGB apps and try again.", sticks.len()));
         }

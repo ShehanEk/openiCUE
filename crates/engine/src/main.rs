@@ -74,7 +74,8 @@ fn run(restore: bool) -> i32 {
         animate(&mut bus, &found, &settings, &stop)
     } else {
         // Try every stick, even after one fails.
-        let failed = found.iter().filter(|s| ram::apply_builtin(&mut bus, s, &settings).is_err()).count();
+        // All sticks at once, so their animations start in sync.
+        let failed = ram::apply_builtin_all(&mut bus, &found, &settings).iter().filter(|r| r.is_err()).count();
         if failed > 0 { 7 } else { 0 }
     }
 }

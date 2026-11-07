@@ -184,10 +184,17 @@ impl Bus for Trace<'_> {
 /// Applies a built-in effect to every detected stick.
 fn effect(bus: &mut dyn Bus, chosen: Effect) {
     let settings = Settings { effect: chosen, ..Settings::default() };
-    for stick in ram::detect(bus) {
-        let mut trace = Trace { inner: &mut *bus, count: 0 };
-        let result = ram::read_info(&mut trace, stick).and_then(|info| ram::apply_builtin(&mut trace, &info, &settings));
-        println!("{:#04x}: {result:?}", stick.get());
+    let mut trace = Trace { inner: bus, count: 0 };
+    let mut infos = Vec::new();
+    for stick in ram::detect(&mut trace) {
+        match ram::read_info(&mut trace, stick) {
+            Ok(info) => infos.push(info),
+            Err(error) => println!("{:#04x}: {error:?}", stick.get()),
+        }
+    }
+    // All sticks at once, so their animations start in sync.
+    for (info, result) in infos.iter().zip(ram::apply_builtin_all(&mut trace, &infos, &settings)) {
+        println!("{:#04x}: {result:?}", info.addr().get());
     }
 }
 

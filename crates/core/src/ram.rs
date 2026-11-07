@@ -89,7 +89,9 @@ const STATUS_BUSY: u8 = 0x08;
 const READY_TRIES: u32 = 50;
 const READY_DELAY_MS: u64 = 10;
 
-fn write_buffer(bus: &mut dyn Bus, addr: StickAddr, data: &[u8], commit: u8) -> Result<(), RamError> {
+/// Loads `data` into the stick's buffer and checks the stick's checksum of it.
+/// Nothing takes effect until a commit.
+fn stage(bus: &mut dyn Bus, addr: StickAddr, data: &[u8]) -> Result<(), RamError> {
     bus.write_byte(addr, REG_RESET_BUFFER, 0)?;
     bus.write_byte(addr, REG_BINARY_START, 0)?;
     for &byte in data {
@@ -98,17 +100,26 @@ fn write_buffer(bus: &mut dyn Bus, addr: StickAddr, data: &[u8], commit: u8) -> 
     if bus.read_byte(addr, REG_CHECKSUM)? != crate::crc::crc8(data) {
         return Err(RamError::ChecksumMismatch);
     }
-    bus.write_byte(addr, REG_COMMIT, commit)?;
-    // As in OpenRGB's WaitReady: poll a bounded number of times, count a failed
-    // read as busy, and carry on either way, since OpenRGB ignores the result.
-    // If the stick is still silent, the next write fails and stops the
-    // sequence. The checksum check above is what guards each commit.
+    Ok(())
+}
+
+/// As in OpenRGB's WaitReady: poll a bounded number of times, count a failed
+/// read as busy, and carry on either way, since OpenRGB ignores the result.
+/// If the stick is still silent, the next write fails and stops the
+/// sequence. The checksum check in `stage` is what guards each commit.
+fn wait_ready(bus: &mut dyn Bus, addr: StickAddr) {
     for _ in 0..READY_TRIES {
         if matches!(bus.read_byte(addr, REG_STATUS), Ok(status) if status & STATUS_BUSY == 0) {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(READY_DELAY_MS));
     }
+}
+
+fn write_buffer(bus: &mut dyn Bus, addr: StickAddr, data: &[u8], commit: u8) -> Result<(), RamError> {
+    stage(bus, addr, data)?;
+    bus.write_byte(addr, REG_COMMIT, commit)?;
+    wait_ready(bus, addr);
     Ok(())
 }
 
@@ -144,19 +155,50 @@ fn effect_packet(mode: u8, settings: &Settings) -> [u8; 20] {
 }
 
 pub fn apply_builtin(bus: &mut dyn Bus, stick: &StickInfo, settings: &Settings) -> Result<(), RamError> {
+    apply_builtin_all(bus, std::slice::from_ref(stick), settings).remove(0)
+}
+
+fn static_colors(settings: &Settings) -> [u8; LED_COUNT * 4] {
+    let Rgb(r, g, b) = settings.color1;
+    let mut colors = [0u8; LED_COUNT * 4];
+    for led in colors.chunks_exact_mut(4) {
+        led.copy_from_slice(&[r, g, b, 255]);
+    }
+    colors
+}
+
+/// Applies a built-in effect to every stick so their animations start
+/// together: each stick's packet is staged and checksum-checked first, then
+/// the commits go out back to back. Committing one stick at a time left each
+/// about 130 ms behind the last (user report, 2026-11-08), because a stick
+/// is silent for about 110 ms after a commit. Returns one result per stick.
+pub fn apply_builtin_all(bus: &mut dyn Bus, sticks: &[StickInfo], settings: &Settings) -> Vec<Result<(), RamError>> {
     let settings = settings.normalized();
-    let mode = settings.effect.mode_byte().ok_or(RamError::CustomEffect)?;
-    write_buffer(bus, stick.addr, &effect_packet(mode, &settings), COMMIT_EFFECT)?;
+    let Some(mode) = settings.effect.mode_byte() else {
+        return sticks.iter().map(|_| Err(RamError::CustomEffect)).collect();
+    };
+    let packet = effect_packet(mode, &settings);
+    let mut results: Vec<Result<(), RamError>> = sticks.iter().map(|s| stage(bus, s.addr, &packet)).collect();
+    for (stick, result) in sticks.iter().zip(results.iter_mut()) {
+        if result.is_ok() {
+            *result = bus.write_byte(stick.addr, REG_COMMIT, COMMIT_EFFECT).map_err(RamError::from);
+        }
+    }
+    for (stick, result) in sticks.iter().zip(&results) {
+        if result.is_ok() {
+            wait_ready(bus, stick.addr);
+        }
+    }
     std::thread::sleep(std::time::Duration::from_millis(EFFECT_SETTLE_MS));
     if settings.effect == crate::effects::Effect::Static {
-        let Rgb(r, g, b) = settings.color1;
-        let mut colors = [0u8; LED_COUNT * 4];
-        for led in colors.chunks_exact_mut(4) {
-            led.copy_from_slice(&[r, g, b, 255]);
+        let colors = static_colors(&settings);
+        for (stick, result) in sticks.iter().zip(results.iter_mut()) {
+            if result.is_ok() {
+                *result = write_buffer(bus, stick.addr, &colors, COMMIT_COLORS);
+            }
         }
-        write_buffer(bus, stick.addr, &colors, COMMIT_COLORS)?;
     }
-    Ok(())
+    results
 }
 
 pub fn write_direct(bus: &mut dyn Bus, stick: &StickInfo, leds: &[Rgb; LED_COUNT]) -> Result<(), RamError> {
@@ -277,6 +319,44 @@ mod tests {
         }
         expected.push((0x82, 1));
         assert_eq!(writes(&bus), expected);
+    }
+
+    #[test]
+    fn all_sticks_are_staged_first_then_committed_back_to_back() {
+        let mut bus = FakeBus::default();
+        let sticks = [stick(4), StickInfo { addr: addr(0x59), product_id: 0x0101, protocol: 4 }];
+        let settings = Settings { effect: Effect::ColorPulse, ..Settings::default() };
+        let results = apply_builtin_all(&mut bus, &sticks, &settings);
+        assert_eq!(results, vec![Ok(()), Ok(())]);
+
+        // Each stick gets exactly the same bytes as a single apply would send.
+        let mut single = FakeBus::default();
+        apply_builtin(&mut single, &stick(4), &settings).unwrap();
+        let one: Vec<(u8, u8)> = writes(&single);
+        for a in [0x58, 0x59] {
+            let mine: Vec<(u8, u8)> = bus.ops.iter().filter_map(|op| match op {
+                Op::Write(at, reg, value) if *at == a => Some((*reg, *value)),
+                _ => None,
+            }).collect();
+            assert_eq!(mine, one, "stick {a:#x}");
+        }
+
+        // The two commits are adjacent: no bus traffic between them.
+        let commit = |a: u8| bus.ops.iter().position(|op| *op == Op::Write(a, 0x82, 1)).unwrap();
+        assert_eq!(commit(0x59), commit(0x58) + 1);
+        // And both sticks were fully staged before the first commit.
+        let last_stage = bus.ops.iter().rposition(|op| matches!(op, Op::Write(_, 0x20, _))).unwrap();
+        assert!(last_stage < commit(0x58));
+    }
+
+    #[test]
+    fn custom_effects_are_never_sent_to_any_stick() {
+        let mut bus = FakeBus::default();
+        let sticks = [stick(4), StickInfo { addr: addr(0x59), product_id: 0x0101, protocol: 4 }];
+        let settings = Settings { effect: Effect::Breathing, ..Settings::default() };
+        let results = apply_builtin_all(&mut bus, &sticks, &settings);
+        assert_eq!(results, vec![Err(RamError::CustomEffect), Err(RamError::CustomEffect)]);
+        assert!(bus.ops.is_empty());
     }
 
     #[test]
