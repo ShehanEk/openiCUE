@@ -47,6 +47,10 @@ pub enum Font {
     Small,
     /// 15 px, error explanations.
     ErrorBody,
+    /// 28 px light, the Settings and picker headings.
+    Heading,
+    /// 22 px light, the stick number in a picker slot.
+    SlotNumber,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,6 +66,17 @@ pub enum Target {
     Stop,
     Apply,
     CheckAgain,
+    /// "Settings", in the app screen's title bar.
+    Settings,
+    /// "‹ Back", in the Settings screen's title bar.
+    Back,
+    /// "Change", which opens the stick-order picker.
+    ChangeOrder,
+    /// A RAM slot in the picker, from 0 on the left.
+    Slot(usize),
+    Cancel,
+    StartOver,
+    SaveOrder,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -89,6 +104,20 @@ pub struct Layout {
     pub cost_body: Option<Rect>,
     pub error_title: Option<Rect>,
     pub error_body: Option<Rect>,
+    /// "Settings" or "Which slot is lit?".
+    pub heading: Option<Rect>,
+    /// "Stick k of n", above the picker heading.
+    pub progress: Option<Rect>,
+    /// The picker's explanation, wrapped.
+    pub body: Option<Rect>,
+    /// "Stick order", in the Settings row.
+    pub row_title: Option<Rect>,
+    /// The note under "Stick order", wrapped.
+    pub row_note: Option<Rect>,
+    /// 1 px lines above and below the Settings row.
+    pub lines: Vec<Rect>,
+    /// The saved order's small slots, left to right.
+    pub order_slots: Vec<Rect>,
     pub buttons: Vec<Button>,
 }
 
@@ -133,8 +162,20 @@ pub fn layout(model: &Model, measure: &dyn Fn(&str, Font) -> f32) -> Layout {
         cost_body: None,
         error_title: None,
         error_body: None,
+        heading: None,
+        progress: None,
+        body: None,
+        row_title: None,
+        row_note: None,
+        lines: Vec::new(),
+        order_slots: Vec::new(),
         buttons: vec![Button { rect: close, target: Target::Close }],
     };
+    match model.screen {
+        Screen::Settings => return settings_screen(out, model, measure),
+        Screen::Arrange => return arrange_screen(out, model, measure),
+        _ => {}
+    }
     if model.screen != Screen::App {
         // Title 40, gap 14, body up to 3 lines (64), gap 28, button 44; centred
         // in the area under the title bar, with the design's 48/92 padding.
@@ -146,6 +187,12 @@ pub fn layout(model: &Model, measure: &dyn Fn(&str, Font) -> f32) -> Layout {
         out.buttons.push(Button { rect, target: Target::CheckAgain });
         return out;
     }
+
+    // "Settings" in the title bar, left of close; the status line ends before it.
+    let w = 24.0 + measure("Settings", Font::Status);
+    let settings = Rect { x: close.x - 4.0 - w, y: 0.0, w, h: TITLE_H };
+    out.buttons.push(Button { rect: settings, target: Target::Settings });
+    out.status.w = settings.x - 12.0 - out.status.x;
 
     let preview = Rect { x: SIDE, y: TITLE_H + 16.0, w: CONTENT_RIGHT - SIDE, h: 4.0 * 16.0 + 3.0 * 8.0 };
     out.preview = Some(preview);
@@ -234,13 +281,87 @@ pub fn layout(model: &Model, measure: &dyn Fn(&str, Font) -> f32) -> Layout {
     out
 }
 
+/// Lines of wrapped text, from 1 to 3, when `text` is set `width` wide.
+fn lines(text: &str, font: Font, width: f32, measure: &dyn Fn(&str, Font) -> f32) -> f32 {
+    (measure(text, font) / width).ceil().clamp(1.0, 3.0)
+}
+
+/// "‹ Back", "Settings", then one row: "Stick order", its note and the saved
+/// order as small slots, with "Change" on the right, between two lines.
+fn settings_screen(mut out: Layout, model: &Model, measure: &dyn Fn(&str, Font) -> f32) -> Layout {
+    // Chevron 11, gap 8, label, with 12 px padding, from the design's 20 px edge.
+    let w = 12.0 + 11.0 + 8.0 + measure("Back", Font::Small) + 12.0;
+    out.buttons.push(Button { rect: Rect { x: 20.0, y: 0.0, w, h: TITLE_H }, target: Target::Back });
+
+    let mut y = TITLE_H + 16.0;
+    out.heading = Some(Rect { x: SIDE, y, w: CONTENT_RIGHT - SIDE, h: 40.0 });
+    y += 40.0 + 24.0;
+    let top = Rect { x: SIDE, y, w: CONTENT_RIGHT - SIDE, h: 1.0 };
+    y += 1.0 + 16.0;
+
+    let change_w = 40.0 + measure("Change", Font::Body);
+    let text_w = CONTENT_RIGHT - change_w - 24.0 - SIDE;
+    out.row_title = Some(Rect { x: SIDE, y, w: text_w, h: 20.0 });
+    y += 20.0 + 4.0;
+    let h = 18.0 * lines(model::ORDER_NOTE, Font::Small, text_w, measure);
+    out.row_note = Some(Rect { x: SIDE, y, w: text_w, h });
+    y += h + 4.0 + 6.0;
+    out.order_slots = (0..model.order.len())
+        .map(|p| Rect { x: SIDE + p as f32 * (28.0 + 6.0), y, w: 28.0, h: 40.0 })
+        .collect();
+    y += 40.0 + 16.0;
+    let bottom = Rect { y, ..top };
+
+    let middle = (top.y + 1.0 + bottom.y) / 2.0;
+    let rect = Rect { x: CONTENT_RIGHT - change_w, y: middle - PILL_H / 2.0, w: change_w, h: PILL_H };
+    out.buttons.push(Button { rect, target: Target::ChangeOrder });
+    out.lines = vec![top, bottom];
+    out
+}
+
+/// "Which slot is lit?": progress, heading and body at the top, one button
+/// per slot centred below, and Cancel, or Start over and Save, at the bottom.
+fn arrange_screen(mut out: Layout, model: &Model, measure: &dyn Fn(&str, Font) -> f32) -> Layout {
+    let mut y = TITLE_H + 16.0;
+    out.progress = Some(Rect { x: SIDE, y, w: CONTENT_RIGHT - SIDE, h: 17.0 });
+    y += 17.0 + 6.0;
+    out.heading = Some(Rect { x: SIDE, y, w: CONTENT_RIGHT - SIDE, h: 40.0 });
+    y += 40.0 + 10.0;
+    let h = 20.0 * lines(model.arrange_body(), Font::Body, 460.0, measure);
+    out.body = Some(Rect { x: SIDE, y, w: 460.0, h });
+    y += h;
+
+    let buttons_y = BOTTOM - PILL_H;
+    let n = model.arranging.max(1);
+    // The design's 96 px slots, narrower only when 7 or 8 wouldn't fit.
+    let gap = 16.0;
+    let w = ((CONTENT_RIGHT - SIDE - gap * (n - 1) as f32) / n as f32).min(96.0);
+    let total = n as f32 * w + (n - 1) as f32 * gap;
+    let slot_y = y + (buttons_y - y - 220.0) / 2.0;
+    for i in 0..model.arranging {
+        let rect = Rect { x: (WIDTH - total) / 2.0 + i as f32 * (w + gap), y: slot_y, w, h: 220.0 };
+        out.buttons.push(Button { rect, target: Target::Slot(i) });
+    }
+
+    let mut right = CONTENT_RIGHT;
+    if model.arrange_done() {
+        let w = 56.0 + measure("Save", Font::BodyBold);
+        out.buttons.push(Button { rect: Rect { x: right - w, y: buttons_y, w, h: PILL_H }, target: Target::SaveOrder });
+        right -= w + 8.0;
+    }
+    let target = if model.arrange_done() { Target::StartOver } else { Target::Cancel };
+    let w = 40.0 + measure(model.arrange_secondary(), Font::Body);
+    out.buttons.push(Button { rect: Rect { x: right - w, y: buttons_y, w, h: PILL_H }, target });
+    out
+}
+
 pub fn hit(layout: &Layout, x: f32, y: f32) -> Option<Target> {
     layout.buttons.iter().find(|b| b.rect.contains(x, y)).map(|b| b.target)
 }
 
-/// The title bar, except the close button, moves the window.
+/// The title bar, except its buttons, moves the window.
 pub fn is_drag_area(layout: &Layout, x: f32, y: f32) -> bool {
-    y < TITLE_H && !layout.close.contains(x, y)
+    y < TITLE_H && hit(layout, x, y).is_none()
 }
 
 #[cfg(test)]
@@ -248,6 +369,7 @@ mod tests {
     use super::*;
     use crate::model::{Model, Screen};
     use openicue_core::effects::{Effect, Settings};
+    use openicue_core::order::StickOrder;
 
     fn measure(text: &str, _: Font) -> f32 {
         text.chars().count() as f32 * 7.0
@@ -361,6 +483,108 @@ mod tests {
         assert!(is_drag_area(&l, 100.0, 20.0));
         assert!(!is_drag_area(&l, WIDTH - 10.0, 20.0));
         assert!(!is_drag_area(&l, 100.0, 60.0));
+    }
+
+    fn assert_fits_and_apart(l: &Layout) {
+        for (i, a) in l.buttons.iter().enumerate() {
+            assert!(a.rect.x >= 0.0 && a.rect.right() <= WIDTH, "{:?}", a.target);
+            assert!(a.rect.y >= 0.0 && a.rect.y + a.rect.h <= HEIGHT, "{:?}", a.target);
+            for b in &l.buttons[i + 1..] {
+                let apart = a.rect.right() <= b.rect.x || b.rect.right() <= a.rect.x
+                    || a.rect.y + a.rect.h <= b.rect.y || b.rect.y + b.rect.h <= a.rect.y;
+                assert!(apart, "{:?} overlaps {:?}", a.target, b.target);
+            }
+        }
+    }
+
+    fn button(l: &Layout, target: Target) -> Rect {
+        l.buttons.iter().find(|b| b.target == target).unwrap_or_else(|| panic!("no {target:?}")).rect
+    }
+
+    #[test]
+    fn settings_sits_in_the_title_bar_left_of_close_on_the_app_only() {
+        let l = layout(&app(Effect::Static), &measure);
+        let settings = button(&l, Target::Settings);
+        assert_eq!((settings.y, settings.h), (0.0, TITLE_H));
+        assert!(settings.right() <= l.close.x && l.status.right() <= settings.x);
+        assert!(!is_drag_area(&l, settings.x + 1.0, 10.0), "the button isn't a drag handle");
+        for screen in [Screen::NoSticks, Screen::Settings, Screen::Arrange] {
+            let mut m = app(Effect::Static);
+            m.screen = screen;
+            m.arranging = 4;
+            assert!(!targets(&layout(&m, &measure)).contains(&Target::Settings), "{screen:?}");
+        }
+    }
+
+    fn settings_screen(order: &[usize]) -> Model {
+        let mut m = app(Effect::Static);
+        m.order = StickOrder::from_picks(order).unwrap();
+        m.open_settings();
+        m
+    }
+
+    #[test]
+    fn settings_screen_has_back_change_and_the_order() {
+        for wide in [7.0, 14.0] {
+            let m = settings_screen(&[0, 2, 1, 3]);
+            let l = layout(&m, &|t: &str, _: Font| t.chars().count() as f32 * wide);
+            assert_eq!(targets(&l), vec![Target::Close, Target::Back, Target::ChangeOrder]);
+            assert_fits_and_apart(&l);
+            let back = button(&l, Target::Back);
+            assert!(back.y == 0.0 && back.x < 40.0);
+            assert!(!is_drag_area(&l, back.x + 1.0, 10.0));
+            let [top, bottom] = l.lines[..] else { panic!("two row lines") };
+            let change = button(&l, Target::ChangeOrder);
+            assert!(change.right() == CONTENT_RIGHT && change.y > top.y && change.y + change.h < bottom.y);
+            assert_eq!(l.order_slots.len(), 4);
+            for slot in &l.order_slots {
+                assert_eq!((slot.w, slot.h), (28.0, 40.0));
+                assert!(slot.y > l.row_note.unwrap().y && slot.y + slot.h < bottom.y);
+                assert!(slot.right() < change.x);
+            }
+            assert!(l.heading.unwrap().y + l.heading.unwrap().h <= top.y);
+            assert!(l.preview.is_none());
+        }
+    }
+
+    fn picker(n: usize, done: bool) -> Model {
+        let mut m = app(Effect::Static);
+        m.open_settings();
+        m.start_arrange(n);
+        if done {
+            for slot in 0..n {
+                m.pick_slot(slot);
+            }
+        }
+        m
+    }
+
+    #[test]
+    fn picker_slots_are_centred_and_fit_for_every_stick_count() {
+        for n in 2..=8 {
+            for done in [false, true] {
+                let l = layout(&picker(n, done), &measure);
+                assert_fits_and_apart(&l);
+                let slots: Vec<Rect> = (0..n).map(|i| button(&l, Target::Slot(i))).collect();
+                assert!(!targets(&l).contains(&Target::Slot(n)));
+                let (left, right) = (slots[0].x, WIDTH - slots[n - 1].right());
+                assert!((left - right).abs() < 0.01, "n={n}: {left} vs {right}");
+                assert!(left >= SIDE, "n={n}");
+                assert!(slots.windows(2).all(|p| p[0].y == p[1].y && (p[1].x - p[0].right() - 16.0).abs() < 0.01));
+                if n <= 6 {
+                    assert_eq!((slots[0].w, slots[0].h), (96.0, 220.0), "the design's size when it fits");
+                }
+                let body = l.body.unwrap();
+                assert!(slots[0].y >= body.y + body.h, "n={n}");
+                let t = targets(&l);
+                assert_eq!(t.contains(&Target::Cancel), !done);
+                assert_eq!(t.contains(&Target::StartOver), done);
+                assert_eq!(t.contains(&Target::SaveOrder), done);
+                let last = if done { button(&l, Target::SaveOrder) } else { button(&l, Target::Cancel) };
+                assert_eq!(last.right(), CONTENT_RIGHT);
+                assert!(slots[0].y + slots[0].h <= last.y);
+            }
+        }
     }
 
     #[test]

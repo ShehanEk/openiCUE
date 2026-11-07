@@ -1,12 +1,39 @@
 //! What the window shows. Pure logic, no Windows calls.
 use openicue_core::costs::{Cost, Costs};
 use openicue_core::effects::{Direction, Effect, Rgb, Settings, Speed, ALL_EFFECTS};
+use openicue_core::order::StickOrder;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
     App,
     NoDriver,
     NoSticks,
+    Settings,
+    /// "Which slot is lit?": the user places each stick in its slot.
+    Arrange,
+}
+
+pub const SETTINGS_TITLE: &str = "Settings";
+pub const ORDER_TITLE: &str = "Stick order";
+pub const ORDER_NOTE: &str = "The order effects move through when openiCUE draws them, such as Chase, Sequential and synced effects.";
+
+/// A stick's color in the order views: `hsl(200 + 40 * stick, 90%, 58%)`.
+pub fn stick_color(stick: usize) -> Rgb {
+    let hue = (200.0 + 40.0 * stick as f32).rem_euclid(360.0) / 60.0;
+    let (saturation, lightness) = (0.9f32, 0.58f32);
+    let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+    let x = chroma * (1.0 - (hue.rem_euclid(2.0) - 1.0).abs());
+    let (r, g, b) = match hue as u32 {
+        0 => (chroma, x, 0.0),
+        1 => (x, chroma, 0.0),
+        2 => (0.0, chroma, x),
+        3 => (0.0, x, chroma),
+        4 => (x, 0.0, chroma),
+        _ => (chroma, 0.0, x),
+    };
+    let m = lightness - chroma / 2.0;
+    let channel = |v: f32| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    Rgb(channel(r), channel(g), channel(b))
 }
 
 pub const SPEEDS: [Speed; 3] = [Speed::Slow, Speed::Medium, Speed::Fast];
@@ -72,6 +99,12 @@ pub struct Model {
     pub live: Option<Cost>,
     /// Overrides the status line until the next selection.
     pub message: String,
+    /// Slot to stick, as saved. Identity when none is saved or it doesn't fit.
+    pub order: StickOrder,
+    /// While arranging: `picks[k]` is the slot chosen for stick `k`.
+    pub picks: Vec<usize>,
+    /// How many sticks are being arranged.
+    pub arranging: usize,
 }
 
 impl Model {
@@ -84,7 +117,108 @@ impl Model {
             costs: Costs::default(),
             live: None,
             message: String::new(),
+            order: StickOrder::identity(0),
+            picks: Vec::new(),
+            arranging: 0,
         }
+    }
+
+    pub fn open_settings(&mut self) {
+        if self.screen == Screen::App {
+            self.screen = Screen::Settings;
+            self.message.clear();
+        }
+    }
+
+    /// Settings goes back to the app; the picker goes back to Settings, unsaved.
+    pub fn back(&mut self) {
+        match self.screen {
+            Screen::Settings => self.screen = Screen::App,
+            Screen::Arrange => {
+                self.screen = Screen::Settings;
+                self.picks.clear();
+            }
+            _ => return,
+        }
+        self.message.clear();
+    }
+
+    /// Opens the picker for `sticks` sticks, with nothing placed yet.
+    pub fn start_arrange(&mut self, sticks: usize) {
+        self.screen = Screen::Arrange;
+        self.arranging = sticks;
+        self.picks.clear();
+        self.message.clear();
+    }
+
+    /// Places the lit stick in `slot`. Taken or unknown slots are ignored.
+    /// When one stick is left, it fills the last free slot. Returns true if
+    /// anything changed.
+    pub fn pick_slot(&mut self, slot: usize) -> bool {
+        if self.arrange_done() || slot >= self.arranging || self.picks.contains(&slot) {
+            return false;
+        }
+        self.picks.push(slot);
+        if self.picks.len() + 1 == self.arranging {
+            if let Some(last) = (0..self.arranging).find(|s| !self.picks.contains(s)) {
+                self.picks.push(last);
+            }
+        }
+        true
+    }
+
+    pub fn arrange_done(&self) -> bool {
+        self.arranging > 0 && self.picks.len() == self.arranging
+    }
+
+    pub fn start_over(&mut self) {
+        self.picks.clear();
+    }
+
+    /// The stick to light white: the first one not placed yet.
+    pub fn lit_stick(&self) -> Option<usize> {
+        (!self.arrange_done()).then_some(self.picks.len())
+    }
+
+    /// The stick placed in `slot` so far, if any.
+    pub fn slot_stick(&self, slot: usize) -> Option<usize> {
+        self.picks.iter().position(|&s| s == slot)
+    }
+
+    pub fn arrange_result(&self) -> Option<StickOrder> {
+        if self.arrange_done() { StickOrder::from_picks(&self.picks) } else { None }
+    }
+
+    pub fn arrange_progress(&self) -> String {
+        if self.arrange_done() {
+            format!("All {} sticks placed", self.arranging)
+        } else {
+            format!("Stick {} of {}", self.picks.len() + 1, self.arranging)
+        }
+    }
+
+    pub fn arrange_heading(&self) -> &'static str {
+        if self.arrange_done() { "Stick order saved" } else { "Which slot is lit?" }
+    }
+
+    pub fn arrange_body(&self) -> &'static str {
+        if self.arrange_done() {
+            "Effects that move between sticks now travel in this order. Numbers show which stick sits in each slot."
+        } else {
+            "One stick on your PC is glowing white. Pick its slot, counting left to right as you look at your RAM."
+        }
+    }
+
+    pub fn arrange_secondary(&self) -> &'static str {
+        if self.arrange_done() { "Start over" } else { "Cancel" }
+    }
+
+    /// The saved order, left to right: each slot's stick number (from 1) and color.
+    pub fn order_slots(&self) -> Vec<(usize, Rgb)> {
+        (0..self.order.len())
+            .filter_map(|p| self.order.stick_at(p))
+            .map(|stick| (stick + 1, stick_color(stick)))
+            .collect()
     }
 
     pub fn select(&mut self, effect: Effect) {
@@ -197,6 +331,10 @@ impl Model {
     }
 
     pub fn status_line(&self) -> String {
+        // Settings and the picker show only messages, such as errors.
+        if matches!(self.screen, Screen::Settings | Screen::Arrange) {
+            return self.message.clone();
+        }
         if self.screen != Screen::App {
             return String::new();
         }
@@ -230,6 +368,7 @@ mod tests {
     use super::*;
     use openicue_core::costs::{Cost, Costs};
     use openicue_core::effects::{Direction, Effect, Rgb, Settings, Speed};
+    use openicue_core::order::StickOrder;
 
     fn model(effect: Effect) -> Model {
         let mut m = Model::new(Settings::default());
@@ -369,6 +508,101 @@ mod tests {
         assert_eq!(names, ["Breathing", "Chase", "Gradient flow"]);
         assert_eq!(speed_name(Speed::Medium), "Medium");
         assert_eq!(direction_name(Direction::Horizontal), "Horizontal");
+    }
+
+    #[test]
+    fn settings_opens_from_the_app_and_back_returns() {
+        let mut m = model(Effect::Static);
+        m.message = "Applied".into();
+        m.open_settings();
+        assert_eq!(m.screen, Screen::Settings);
+        assert_eq!(m.status_line(), "", "the app's status line stays on the app screen");
+        m.message = "Couldn't reach the RAM".into();
+        assert_eq!(m.status_line(), "Couldn't reach the RAM", "errors still show");
+        m.back();
+        assert_eq!((m.screen, m.message.as_str()), (Screen::App, ""));
+        m.screen = Screen::NoSticks;
+        m.open_settings();
+        assert_eq!(m.screen, Screen::NoSticks, "only from the app screen");
+    }
+
+    #[test]
+    fn settings_text_matches_the_design() {
+        assert_eq!(SETTINGS_TITLE, "Settings");
+        assert_eq!(ORDER_TITLE, "Stick order");
+        assert_eq!(ORDER_NOTE, "The order effects move through when openiCUE draws them, such as Chase, Sequential and synced effects.");
+        let mut m = model(Effect::Static);
+        m.order = StickOrder::from_picks(&[0, 2, 1, 3]).unwrap();
+        assert_eq!(m.order_slots(), vec![(1, stick_color(0)), (3, stick_color(2)), (2, stick_color(1)), (4, stick_color(3))]);
+    }
+
+    #[test]
+    fn stick_colors_follow_the_design_hues() {
+        // hsl(200, 90%, 58%), then 40 degrees further per stick.
+        assert_eq!(stick_color(0), Rgb(52, 180, 244));
+        assert_eq!(stick_color(1), Rgb(52, 52, 244));
+        assert_eq!(stick_color(4), Rgb(244, 52, 52), "360 wraps to red");
+    }
+
+    fn arranging(n: usize) -> Model {
+        let mut m = model(Effect::Static);
+        m.open_settings();
+        m.start_arrange(n);
+        m
+    }
+
+    #[test]
+    fn picker_asks_for_each_stick_in_turn() {
+        let mut m = arranging(4);
+        assert_eq!(m.screen, Screen::Arrange);
+        assert_eq!(m.lit_stick(), Some(0));
+        assert_eq!(m.arrange_progress(), "Stick 1 of 4");
+        assert_eq!(m.arrange_heading(), "Which slot is lit?");
+        assert_eq!(m.arrange_body(), "One stick on your PC is glowing white. Pick its slot, counting left to right as you look at your RAM.");
+        assert_eq!(m.arrange_secondary(), "Cancel");
+        assert!(m.pick_slot(0));
+        assert_eq!((m.lit_stick(), m.arrange_progress().as_str()), (Some(1), "Stick 2 of 4"));
+        assert!(!m.pick_slot(0), "a taken slot is ignored");
+        assert!(!m.pick_slot(4), "no such slot");
+        assert_eq!(m.picks, vec![0]);
+        assert_eq!(m.slot_stick(0), Some(0));
+        assert_eq!(m.slot_stick(1), None);
+        assert!(m.arrange_result().is_none());
+    }
+
+    #[test]
+    fn the_last_stick_fills_itself_in() {
+        let mut m = arranging(4);
+        assert!(m.pick_slot(0) && m.pick_slot(2) && m.pick_slot(1));
+        assert_eq!(m.picks, vec![0, 2, 1, 3]);
+        assert!(m.arrange_done());
+        assert_eq!(m.lit_stick(), None);
+        assert!(!m.pick_slot(3), "nothing left to pick");
+        assert_eq!(m.arrange_progress(), "All 4 sticks placed");
+        assert_eq!(m.arrange_heading(), "Stick order saved");
+        assert_eq!(m.arrange_body(), "Effects that move between sticks now travel in this order. Numbers show which stick sits in each slot.");
+        assert_eq!(m.arrange_secondary(), "Start over");
+        assert_eq!(m.arrange_result(), StickOrder::from_picks(&[0, 2, 1, 3]));
+        assert_eq!((0..4).map(|s| m.slot_stick(s)).collect::<Vec<_>>(), [Some(0), Some(2), Some(1), Some(3)]);
+
+        let mut two = arranging(2);
+        assert!(two.pick_slot(1));
+        assert_eq!(two.arrange_result(), StickOrder::from_picks(&[1, 0]), "two sticks need one pick");
+    }
+
+    #[test]
+    fn start_over_and_cancel_clear_the_picks() {
+        let mut m = arranging(3);
+        m.pick_slot(2);
+        m.pick_slot(0);
+        m.start_over();
+        assert_eq!((m.picks.len(), m.lit_stick()), (0, Some(0)));
+        m.pick_slot(1);
+        m.back();
+        assert_eq!(m.screen, Screen::Settings, "back from the picker is cancel");
+        assert!(m.picks.is_empty());
+        m.start_arrange(3);
+        assert!(m.picks.is_empty(), "start clears picks");
     }
 
     #[test]

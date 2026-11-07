@@ -5,6 +5,7 @@ use openicue::layout::{self, Layout, Target};
 use openicue::model::{Model, Screen};
 use openicue_core::costs::Cost;
 use openicue_core::effects::Rgb;
+use openicue_core::order::StickOrder;
 use openicue_core::{control, system};
 use std::ptr::{null, null_mut};
 use std::time::Instant;
@@ -38,6 +39,8 @@ pub struct App {
     pub start: Instant,
     pub scale: f32,
     pub last_sample: Option<control::Sample>,
+    /// The engine claim and sticks while the stick-order picker is open.
+    pub arranging: Option<actions::Arranging>,
 }
 
 impl App {
@@ -54,6 +57,7 @@ impl App {
             Startup::Ready(hardware, count) => {
                 self.model.screen = Screen::App;
                 self.model.sticks = count;
+                self.model.order = StickOrder::or_identity(system::load_order(), count);
                 self.hardware = Some(hardware);
             }
         }
@@ -160,6 +164,109 @@ fn stop(hwnd: HWND) {
     finish(hwnd, result, "Background process stopped");
 }
 
+/// "Change": stops the engine, takes its claim for as long as the picker is
+/// open, and lights the first stick white.
+fn change_order(hwnd: HWND) {
+    show_now(hwnd, "Getting ready…");
+    let result = match app(hwnd).and_then(|a| a.hardware.as_mut()) {
+        Some(hardware) => hardware.begin_arrange(),
+        None => Err("Couldn't reach the RAM. Check again.".to_string()),
+    };
+    match result {
+        Ok(arranging) => {
+            if let Some(a) = app(hwnd) {
+                a.model.start_arrange(arranging.count());
+                a.arranging = Some(arranging);
+                // The engine is stopped, and our own claim would read as a running
+                // engine, so stop measuring until the lights are put back.
+                a.model.running = None;
+                a.model.live = None;
+                a.last_sample = None;
+            }
+            // SAFETY: plain call on our own window.
+            unsafe { KillTimer(hwnd, TIMER_COST) };
+        }
+        Err(error) => {
+            // The engine may have been stopped, or some sticks lit: put the saved effect back.
+            let _ = restore_lights(hwnd);
+            finish(hwnd, Err(error), "");
+        }
+    }
+}
+
+/// Lights `stick` white and the rest black, or shows why it couldn't.
+fn light(hwnd: HWND, stick: usize) {
+    let Some(a) = app(hwnd) else { return };
+    let (Some(hardware), Some(arranging)) = (a.hardware.as_mut(), a.arranging.as_ref()) else { return };
+    match hardware.light(arranging, stick) {
+        Ok(()) => a.model.message.clear(),
+        Err(error) => a.model.message = error,
+    }
+}
+
+fn pick_slot(hwnd: HWND, slot: usize) {
+    let Some(a) = app(hwnd) else { return };
+    let next = if a.model.pick_slot(slot) { a.model.lit_stick() } else { None };
+    if let Some(next) = next {
+        light(hwnd, next);
+    }
+}
+
+fn start_over(hwnd: HWND) {
+    if let Some(a) = app(hwnd) {
+        a.model.start_over();
+    }
+    light(hwnd, 0);
+}
+
+/// Releases the claim, then re-applies the saved effect, which puts the lights back.
+fn restore_lights(hwnd: HWND) -> Result<(), String> {
+    if let Some(a) = app(hwnd) {
+        a.arranging = None;
+    }
+    actions::restore_saved(app(hwnd).and_then(|a| a.hardware.as_mut()))
+}
+
+/// Cancel, Back or Esc in the picker: nothing is saved.
+fn cancel_arrange(hwnd: HWND) {
+    show_now(hwnd, "Putting your lights back…");
+    let result = restore_lights(hwnd);
+    if let Some(a) = app(hwnd) {
+        a.model.back();
+    }
+    finish(hwnd, result, "");
+}
+
+/// Saves the order, then puts the lights back. If saving fails, the picker
+/// stays open with its claim, so the user can try again or cancel.
+fn save_order(hwnd: HWND) {
+    let Some(order) = app(hwnd).and_then(|a| a.model.arrange_result()) else { return };
+    if system::save_order(&order).is_err() {
+        if let Some(a) = app(hwnd) {
+            a.model.message = "Couldn't save the stick order. Try again.".to_string();
+        }
+        return;
+    }
+    if let Some(a) = app(hwnd) {
+        a.model.order = order;
+    }
+    show_now(hwnd, "Putting your lights back…");
+    let result = restore_lights(hwnd);
+    if let Some(a) = app(hwnd) {
+        a.model.back();
+    }
+    finish(hwnd, result, "Stick order saved");
+}
+
+/// Closing from the picker puts the lights back first.
+fn close(hwnd: HWND) {
+    if app(hwnd).is_some_and(|a| a.arranging.is_some()) {
+        cancel_arrange(hwnd);
+    }
+    // SAFETY: plain call on our own window.
+    unsafe { DestroyWindow(hwnd) };
+}
+
 fn tenth(x: f32) -> f32 {
     (x * 10.0).round() / 10.0
 }
@@ -192,9 +299,20 @@ fn sample_cost(hwnd: HWND) {
 fn click(hwnd: HWND, target: Target) {
     match target {
         Target::Close => {
-            // SAFETY: plain call on our own window.
-            unsafe { DestroyWindow(hwnd) };
+            close(hwnd);
             return;
+        }
+        Target::ChangeOrder => change_order(hwnd),
+        Target::Slot(slot) => pick_slot(hwnd, slot),
+        Target::StartOver => start_over(hwnd),
+        Target::SaveOrder => save_order(hwnd),
+        Target::Cancel => cancel_arrange(hwnd),
+        Target::Back => {
+            if app(hwnd).is_some_and(|a| a.model.screen == Screen::Arrange) {
+                cancel_arrange(hwnd);
+            } else if let Some(a) = app(hwnd) {
+                a.model.back();
+            }
         }
         Target::Color(n) => {
             let Some(current) = app(hwnd).map(|a| if n == 1 { a.model.settings.color1 } else { a.model.settings.color2 }) else { return };
@@ -221,6 +339,7 @@ fn click(hwnd: HWND, target: Target) {
                 Target::Direction(d) => a.model.set_direction(d),
                 Target::Random => a.model.toggle_random(),
                 Target::Sync => a.model.toggle_sync(),
+                Target::Settings => a.model.open_settings(),
                 _ => {}
             }
         }
@@ -291,7 +410,12 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
         }
         WM_KEYDOWN => {
             if wparam == VK_ESCAPE as usize {
-                DestroyWindow(hwnd);
+                // Esc is Back on Settings and Cancel in the picker; elsewhere it closes.
+                match app(hwnd).map(|a| a.model.screen) {
+                    Some(Screen::Settings) => click(hwnd, Target::Back),
+                    Some(Screen::Arrange) => click(hwnd, Target::Cancel),
+                    _ => close(hwnd),
+                }
             } else if wparam == VK_RETURN as usize
                 && app(hwnd).is_some_and(|a| a.model.screen == Screen::App)
             {
@@ -305,6 +429,11 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             }
             let r = &*(lparam as *const RECT);
             SetWindowPos(hwnd, null_mut(), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
+            0
+        }
+        WM_CLOSE => {
+            // Alt+F4 and the taskbar: like the close button.
+            close(hwnd);
             0
         }
         WM_DESTROY => {
@@ -362,6 +491,7 @@ pub fn run() -> i32 {
             start: Instant::now(),
             scale: 1.0,
             last_sample: None,
+            arranging: None,
         });
         let raw = Box::into_raw(app);
         (*raw).check();

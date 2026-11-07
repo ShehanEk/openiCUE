@@ -19,6 +19,8 @@ const ORANGE: u32 = 0xFFFFB066;
 const DOT_ON_SELECTED: u32 = 0xFFB45A00;
 const SWATCH_EDGE: u32 = 0xFF2A2D33;
 const DIVIDER: u32 = 0xFF1E2126;
+/// An empty slot in the stick-order picker.
+const SLOT_EMPTY: u32 = 0xFF121418;
 
 fn argb(c: Rgb, alpha: u8) -> u32 {
     (u32::from(alpha) << 24) | (u32::from(c.0) << 16) | (u32::from(c.1) << 8) | u32::from(c.2)
@@ -30,7 +32,7 @@ fn rect_f(r: Rect) -> RectF {
 
 pub struct Painter {
     families: [*mut GpFontFamily; 3],
-    fonts: [*mut GpFont; 9],
+    fonts: [*mut GpFont; 11],
     format: *mut GpStringFormat,
 }
 
@@ -46,6 +48,8 @@ fn index(font: Font) -> usize {
         Font::Big => 6,
         Font::Small => 7,
         Font::ErrorBody => 8,
+        Font::Heading => 9,
+        Font::SlotNumber => 10,
     }
 }
 
@@ -77,6 +81,8 @@ impl Painter {
             font(light, 30.0, FontStyleRegular),
             font(regular, 13.0, FontStyleRegular),
             font(regular, 15.0, FontStyleRegular),
+            font(light, 28.0, FontStyleRegular),
+            font(light, 22.0, FontStyleRegular),
         ];
         let mut typographic = null_mut();
         let mut format = null_mut();
@@ -191,36 +197,51 @@ impl Painter {
         }
     }
 
+    /// Word-wrapped text from the top of `rect`. `align` as in `text`.
+    fn wrapped(&self, g: *mut GpGraphics, text: &str, font: Font, rect: Rect, color: u32, align: i32) {
+        let mut brush = null_mut();
+        let wide = rgb_wide(text);
+        // SAFETY: as in `text`.
+        unsafe {
+            GdipCreateSolidFill(color, &mut brush);
+            GdipSetStringFormatAlign(self.format, align);
+            GdipSetStringFormatLineAlign(self.format, StringAlignmentNear);
+            GdipDrawString(g, wide.as_ptr(), (wide.len() - 1) as i32, self.fonts[index(font)],
+                &rect_f(rect), self.format, brush.cast());
+            GdipDeleteBrush(brush.cast());
+        }
+    }
+
     fn draw(&self, g: *mut GpGraphics, model: &Model, l: &Layout, seconds: f32) {
-        self.text(g, "openiCUE", Font::Brand, Rect { x: 32.0, y: 0.0, w: 160.0, h: layout::TITLE_H }, FG, 0);
+        // Settings has "‹ Back" where the other screens have the name.
+        if model.screen != Screen::Settings {
+            self.text(g, "openiCUE", Font::Brand, Rect { x: 32.0, y: 0.0, w: 160.0, h: layout::TITLE_H }, FG, 0);
+        }
         self.text(g, &model.status_line(), Font::Status, l.status, MUTED, 2);
         let c = l.close;
         let (cx, cy) = (c.x + c.w / 2.0, c.y + c.h / 2.0);
         self.line(g, MUTED, 1.2, &[(cx - 5.5, cy - 5.5), (cx + 5.5, cy + 5.5)]);
         self.line(g, MUTED, 1.2, &[(cx + 5.5, cy - 5.5), (cx - 5.5, cy + 5.5)]);
 
-        if model.screen != Screen::App {
-            self.text(g, model.error_title(), Font::Big, l.error_title.unwrap(), FG, 1);
-            if let Some(body) = l.error_body {
-                let mut brush = null_mut();
-                let wide = rgb_wide(model.error_body());
-                // SAFETY: as in `text`, with word-wrapping (no line alignment change needed).
-                unsafe {
-                    GdipCreateSolidFill(MUTED, &mut brush);
-                    GdipSetStringFormatAlign(self.format, StringAlignmentCenter);
-                    GdipSetStringFormatLineAlign(self.format, StringAlignmentNear);
-                    GdipDrawString(g, wide.as_ptr(), (wide.len() - 1) as i32, self.fonts[index(Font::ErrorBody)],
-                        &rect_f(body), self.format, brush.cast());
-                    GdipDeleteBrush(brush.cast());
+        match model.screen {
+            Screen::NoDriver | Screen::NoSticks => {
+                self.text(g, model.error_title(), Font::Big, l.error_title.unwrap(), FG, 1);
+                if let Some(body) = l.error_body {
+                    self.wrapped(g, model.error_body(), Font::ErrorBody, body, MUTED, StringAlignmentCenter);
                 }
-            }
-            for b in &l.buttons {
-                if b.target == Target::CheckAgain {
-                    self.rounded(g, b.rect, 22.0, PILL);
-                    self.text(g, "Check again", Font::Body, b.rect, FG, 1);
+                for b in &l.buttons {
+                    if b.target == Target::CheckAgain {
+                        self.rounded(g, b.rect, 22.0, PILL);
+                        self.text(g, "Check again", Font::Body, b.rect, FG, 1);
+                    }
                 }
+                return;
             }
-            return;
+            Screen::Settings | Screen::Arrange => {
+                self.draw_order_screens(g, model, l);
+                return;
+            }
+            Screen::App => {}
         }
 
         if let Some(p) = l.preview {
@@ -269,6 +290,79 @@ impl Painter {
         if let Some(r) = l.cost_body {
             self.text(g, model.cost_body(), Font::Small, r, MUTED, 0);
         }
+    }
+
+    /// The Settings screen and the "Which slot is lit?" picker.
+    fn draw_order_screens(&self, g: *mut GpGraphics, model: &Model, l: &Layout) {
+        if let Some(r) = l.progress {
+            self.text(g, &model.arrange_progress(), Font::Label, r, MUTED, 0);
+        }
+        if let Some(r) = l.heading {
+            let heading = if model.screen == Screen::Settings { model::SETTINGS_TITLE } else { model.arrange_heading() };
+            self.text(g, heading, Font::Heading, r, FG, 0);
+        }
+        if let Some(r) = l.body {
+            self.wrapped(g, model.arrange_body(), Font::Body, r, MUTED, StringAlignmentNear);
+        }
+        for line in &l.lines {
+            self.rounded(g, *line, 0.0, DIVIDER);
+        }
+        if let Some(r) = l.row_title {
+            self.text(g, model::ORDER_TITLE, Font::Body, r, FG, 0);
+        }
+        if let Some(r) = l.row_note {
+            self.wrapped(g, model::ORDER_NOTE, Font::Small, r, MUTED, StringAlignmentNear);
+        }
+        for (r, (number, color)) in l.order_slots.iter().zip(model.order_slots()) {
+            let inner = self.slot_body(g, *r, 4.0, PILL);
+            self.slot_bar(g, inner, 4.0, 3.0, argb(color, 0xFF), PILL);
+            let below = Rect { y: inner.y + 4.0, h: inner.h - 4.0, ..inner };
+            self.text(g, &number.to_string(), Font::Label, below, FG, 1);
+        }
+        for b in &l.buttons {
+            self.button(g, model, b.rect, b.target);
+        }
+    }
+
+    /// A slot's outline and fill. Returns the area inside the 1 px outline.
+    fn slot_body(&self, g: *mut GpGraphics, r: Rect, radius: f32, fill: u32) -> Rect {
+        self.rounded(g, r, radius, SWATCH_EDGE);
+        let inner = Rect { x: r.x + 1.0, y: r.y + 1.0, w: r.w - 2.0, h: r.h - 2.0 };
+        self.rounded(g, inner, radius - 1.0, fill);
+        inner
+    }
+
+    /// The LED bar across the top of a slot, rounded only at the top.
+    fn slot_bar(&self, g: *mut GpGraphics, inner: Rect, height: f32, radius: f32, color: u32, fill: u32) {
+        self.rounded(g, Rect { h: height + radius, ..inner }, radius, color);
+        self.rounded(g, Rect { y: inner.y + height, h: radius, ..inner }, 0.0, fill);
+    }
+
+    /// One picker slot: a body with an 8 px LED bar and the stick number
+    /// once placed, then "Slot i" underneath.
+    fn picker_slot(&self, g: *mut GpGraphics, model: &Model, r: Rect, slot: usize) {
+        let stick = model.slot_stick(slot);
+        let fill = if stick.is_some() { PILL } else { SLOT_EMPTY };
+        let label = Rect { x: r.x, y: r.y + r.h - 17.0, w: r.w, h: 17.0 };
+        let inner = self.slot_body(g, Rect { h: label.y - 10.0 - r.y, ..r }, 6.0, fill);
+        let bar = Rect { h: 8.0, ..inner };
+        match stick {
+            Some(stick) => {
+                let color = model::stick_color(stick);
+                // The glow stays inside the slot, as the design clips it.
+                // SAFETY: live graphics; the clip is reset right after.
+                unsafe { GdipSetClipRect(g, inner.x, inner.y, inner.w, inner.h, CombineModeReplace) };
+                self.glow(g, bar, color);
+                // SAFETY: as above.
+                unsafe { GdipResetClip(g) };
+                self.slot_bar(g, inner, 8.0, 5.0, argb(color, 0xFF), fill);
+                let below = Rect { y: inner.y + 8.0, h: inner.h - 8.0, ..inner };
+                self.text(g, &(stick + 1).to_string(), Font::SlotNumber, below, FG, 1);
+            }
+            None => self.slot_bar(g, inner, 8.0, 5.0, DIVIDER, fill),
+        }
+        let color = if stick.is_some() { FG } else { MUTED };
+        self.text(g, &format!("Slot {}", slot + 1), Font::Label, label, color, 1);
     }
 
     fn pill(&self, g: *mut GpGraphics, r: Rect, label: &str, font: Font, on: bool) {
@@ -332,6 +426,28 @@ impl Painter {
                 self.text(g, model.apply_label(), Font::BodyBold, r, BG, 1);
             }
             Target::CheckAgain => self.pill(g, r, "Check again", Font::Body, false),
+            Target::Settings => self.text(g, "Settings", Font::Status, r, PILL_TEXT, 1),
+            Target::Back => {
+                // An 11 px chevron, then the label, inside 12 px padding.
+                let (x, cy) = (r.x + 12.0, r.y + r.h / 2.0);
+                let k = 11.0 / 12.0;
+                self.line(g, PILL_TEXT, 1.2, &[(x + 8.0 * k, cy - 5.0 * k), (x + 3.0 * k, cy), (x + 8.0 * k, cy + 5.0 * k)]);
+                let text = Rect { x: x + 11.0 + 8.0, y: r.y, w: r.right() - x - 19.0, h: r.h };
+                self.text(g, "Back", Font::Small, text, PILL_TEXT, 0);
+            }
+            Target::ChangeOrder | Target::Cancel | Target::StartOver => {
+                let label = match target {
+                    Target::ChangeOrder => "Change",
+                    _ => model.arrange_secondary(),
+                };
+                self.rounded(g, r, 22.0, PILL);
+                self.text(g, label, Font::Body, r, FG, 1);
+            }
+            Target::SaveOrder => {
+                self.rounded(g, r, 22.0, FG);
+                self.text(g, "Save", Font::BodyBold, r, BG, 1);
+            }
+            Target::Slot(i) => self.picker_slot(g, model, r, i),
         }
     }
 }

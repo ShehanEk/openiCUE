@@ -52,6 +52,56 @@ impl Hardware {
     }
 }
 
+/// Held while the stick-order picker is open: the engine claim, so no other
+/// openiCUE process writes to the RAM meanwhile, and the sticks being placed.
+pub struct Arranging {
+    _claim: system::EngineClaim,
+    sticks: Vec<ram::StickInfo>,
+}
+
+impl Arranging {
+    pub fn count(&self) -> usize {
+        self.sticks.len()
+    }
+}
+
+impl Hardware {
+    /// Stops any engine, takes the claim and lights the first stick white.
+    /// Needs at least 2 sticks, since one has nothing to order.
+    pub fn begin_arrange(&mut self) -> Result<Arranging, String> {
+        stop_first()?;
+        let Ok(Some(claim)) = system::claim_engine() else { return Err(BUSY.to_string()) };
+        let sticks: Vec<ram::StickInfo> = ram::detect(&mut self.bus)
+            .into_iter()
+            .filter_map(|addr| ram::read_info(&mut self.bus, addr).ok())
+            .collect();
+        if sticks.len() < 2 {
+            return Err("Stick order needs at least 2 sticks that answer. Close other RGB apps and try again.".to_string());
+        }
+        let arranging = Arranging { _claim: claim, sticks };
+        self.light(&arranging, 0)?;
+        Ok(arranging)
+    }
+
+    /// Lights `stick` (address order) white and the others black.
+    pub fn light(&mut self, arranging: &Arranging, stick: usize) -> Result<(), String> {
+        ram::light_only(&mut self.bus, &arranging.sticks, stick).map_err(|_| BUSY.to_string())
+    }
+}
+
+/// Puts the lights back after the picker by re-applying the saved effect,
+/// as Apply would. Call it only after the `Arranging` claim is dropped.
+pub fn restore_saved(hardware: Option<&mut Hardware>) -> Result<(), String> {
+    let settings = system::load_settings();
+    if settings.runs_in_software() {
+        return apply_custom(&settings);
+    }
+    match hardware {
+        Some(hardware) => hardware.apply_builtin(&settings),
+        None => Err("Couldn't reach the RAM. Check again.".to_string()),
+    }
+}
+
 /// How long a fresh engine gets to claim its lock before we call it failed.
 const START_TIMEOUT: Duration = Duration::from_secs(1);
 const START_POLL: Duration = Duration::from_millis(50);
