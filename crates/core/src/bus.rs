@@ -23,6 +23,8 @@ pub enum BusError {
     BlockTooLong,
     /// The driver is not on SMBus port 0, so we refuse to talk to it.
     UnexpectedPort,
+    /// The driver returned a different number of bytes than were asked for.
+    ShortReply,
 }
 
 pub trait Bus {

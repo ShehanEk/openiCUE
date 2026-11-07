@@ -4,12 +4,13 @@
 //! - 0: built-in effect applied (`--run`) or already kept by the sticks
 //!   (`--restore`), or a custom effect stopped on request
 //! - 2: missing, unknown or extra arguments
-//! - 3: another engine is already running, or the claim failed
+//! - 3: another engine is already running
 //! - 4: could not open the stop event
 //! - 5: could not open PawnIO
 //! - 6: no sticks found
 //! - 7: applying a built-in effect failed on at least one stick
 //! - 8: a direct write failed several times in a row while animating
+//! - 9: couldn't create the engine lock (usually not run as admin)
 #![windows_subsystem = "windows"]
 use openicue_core::bus::Bus;
 use openicue_core::effects::{Rgb, Settings};
@@ -48,7 +49,11 @@ fn sticks(bus: &mut dyn Bus) -> Vec<StickInfo> {
 }
 
 fn run(restore: bool) -> i32 {
-    let Ok(Some(_claim)) = system::claim_engine() else { return 3 };
+    let _claim = match system::claim_engine() {
+        Ok(Some(claim)) => claim,
+        Ok(None) => return 3,
+        Err(_) => return 9,
+    };
     // The sticks keep built-in effects through restarts and power-off
     // (hardware stage 5), and every rewrite saves to their own memory,
     // so a logon restore only has work to do for custom effects.

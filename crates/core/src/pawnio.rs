@@ -21,6 +21,9 @@ const ERROR_LOCK_TIMEOUT: i32 = -2;
 
 const GENERIC_READ_WRITE: u32 = 0x8000_0000 | 0x4000_0000;
 const FILE_SHARE_ALL: u32 = 1 | 2 | 4;
+/// Synchronous I/O, so a request can never complete after its buffers are gone.
+const SYNCHRONIZE: u32 = 0x0010_0000;
+const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0000_0020;
 
 #[repr(C)]
 struct UnicodeString { length: u16, maximum_length: u16, buffer: *const u16 }
@@ -72,7 +75,8 @@ impl PawnIoBus {
         let mut io_status = IoStatusBlock { status: 0, information: 0 };
         let mut device: HANDLE = null_mut();
         let status = unsafe {
-            NtOpenFile(&mut device, GENERIC_READ_WRITE, &attributes, &mut io_status, FILE_SHARE_ALL, 0)
+            NtOpenFile(&mut device, GENERIC_READ_WRITE | SYNCHRONIZE, &attributes, &mut io_status,
+                FILE_SHARE_ALL, FILE_SYNCHRONOUS_IO_NONALERT)
         };
         if status < 0 {
             return Err(BusError::Os(status));
@@ -117,7 +121,7 @@ impl PawnIoBus {
         if ok == 0 {
             return Err(BusError::Os(unsafe { GetLastError() } as i32));
         }
-        Ok(())
+        check_returned(returned, output.len())
     }
 
     /// Runs `op` while holding the lock shared with other hardware tools.
@@ -199,6 +203,12 @@ fn block_cells(data: &[u8]) -> Result<[u64; 5], BusError> {
     Ok(cells)
 }
 
+/// The driver must fill exactly the cells we asked for, so a short reply
+/// can never be read as zeros.
+fn check_returned(returned: u32, cells: usize) -> Result<(), BusError> {
+    if returned as usize == cells * 8 { Ok(()) } else { Err(BusError::ShortReply) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,5 +230,18 @@ mod tests {
         assert_eq!(cells[0], 0x1111_1111_1111_1120);
         assert_eq!(cells[1..4], [0x1111_1111_1111_1111; 3]);
         assert_eq!(cells[4], 0x11);
+    }
+
+    #[test]
+    fn accepts_a_reply_of_exactly_the_requested_size() {
+        assert_eq!(check_returned(8, 1), Ok(()));
+        assert_eq!(check_returned(0, 0), Ok(()));
+    }
+
+    #[test]
+    fn rejects_a_short_or_long_reply() {
+        assert_eq!(check_returned(0, 1), Err(BusError::ShortReply));
+        assert_eq!(check_returned(4, 1), Err(BusError::ShortReply));
+        assert_eq!(check_returned(16, 1), Err(BusError::ShortReply));
     }
 }
