@@ -103,3 +103,13 @@ The window (`target\release\openicue.exe`, commit `4bfd399`) ran through the 6 c
 
 - **Result:** the user reported no failures.
 - **Breathing's live cost in the window:** **1.5 MB · 0.8% CPU**. That's a share of all logical processors, like Task Manager, and matches the stage 4 model (about 13% of one core on this CPU).
+
+## 2026-11-08: Built-in effects don't stay in sync across sticks
+
+- **Observed:** after Color pulse is applied, the 4 sticks pulse at different moments. Applying a different effect first (Rainbow) doesn't help.
+- **Tried (`23fb9e9`):** staged the packet on every stick, then sent the 4 commits back to back, about 1 ms apart. The sticks are still out of phase immediately, so each stick evidently runs the animation on its own timer.
+- **Research (2026-11-08):**
+  - No public sync, broadcast or timer-reset command exists for Vengeance RGB Pro. OpenRGB's register list has none.
+  - Users report the same drift under iCUE's hardware playback.
+  - iCUE's synced lighting most likely streams colours from software (direct mode), as openiCUE's custom effects do.
+- **Conclusion:** built-in effects run in sync only by chance. In-sync lighting needs software-driven effects, which cost about 1.5 MB and 0.8% CPU.
