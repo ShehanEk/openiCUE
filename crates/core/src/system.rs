@@ -1,5 +1,6 @@
 //! Windows objects that only Administrators and System can touch.
 use crate::config;
+use crate::costs::{self, Costs};
 use crate::effects::Settings;
 use std::ffi::OsString;
 use std::io::Read;
@@ -289,6 +290,20 @@ pub fn load_settings() -> Settings {
 pub fn save_settings(settings: &Settings) -> Result<(), u32> {
     let path = secure_data_dir()?.join("settings.txt");
     std::fs::write(path, config::serialize(settings)).map_err(os_error)
+}
+
+/// Any problem gives no stored costs, so the window shows "Not measured yet".
+pub fn load_costs() -> Costs {
+    let read = || -> Option<Costs> {
+        let path = secure_data_dir().ok()?.join("costs.txt");
+        costs::parse(&read_limited(std::fs::File::open(path).ok()?)?)
+    };
+    read().unwrap_or_default()
+}
+
+pub fn save_costs(costs: &Costs) -> Result<(), u32> {
+    let path = secure_data_dir()?.join("costs.txt");
+    std::fs::write(path, costs::serialize(costs)).map_err(os_error)
 }
 
 pub struct StopEvent {
