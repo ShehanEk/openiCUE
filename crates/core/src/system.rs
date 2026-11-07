@@ -24,7 +24,7 @@ use windows_sys::Win32::Security::{
 };
 use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
 use windows_sys::Win32::System::Com::CoTaskMemFree;
-use windows_sys::Win32::System::Threading::{CreateEventW, CreateMutexW, SetEvent, WaitForSingleObject};
+use windows_sys::Win32::System::Threading::{CreateEventW, CreateMutexW, OpenMutexW, SetEvent, WaitForSingleObject};
 use windows_sys::Win32::UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath};
 
 /// The data folder exists but a non-admin could have made or swapped it.
@@ -377,6 +377,24 @@ pub fn claim_engine() -> Result<Option<EngineClaim>, u32> {
         return Ok(None);
     }
     Ok(Some(claim))
+}
+
+/// True if an admin-owned engine claim exists. It only opens the mutex,
+/// never creates it, so it can't make an engine starting at the same moment
+/// think another one is running.
+pub fn engine_claimed() -> bool {
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    const READ_CONTROL: u32 = 0x0002_0000;
+    let name = wide("Global\\openiCUE.Engine");
+    // SAFETY: NUL-terminated name; the handle is checked, then closed below.
+    let handle = unsafe { OpenMutexW(SYNCHRONIZE | READ_CONTROL, 0, name.as_ptr()) };
+    if handle.is_null() {
+        return false;
+    }
+    let trusted = require_admin_owner(handle).is_ok();
+    // SAFETY: `handle` was opened above and is closed exactly once.
+    unsafe { CloseHandle(handle) };
+    trusted
 }
 
 impl Drop for EngineClaim {

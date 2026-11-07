@@ -49,6 +49,10 @@ fn sticks(bus: &mut dyn Bus) -> Vec<StickInfo> {
 }
 
 fn run(restore: bool) -> i32 {
+    // Open the stop event before claiming, so a window that sees the claim
+    // always finds the event to signal. An engine that loses the claim
+    // never waits on it, so holding it briefly is harmless.
+    let Ok(stop) = system::open_stop_event() else { return 4 };
     let _claim = match system::claim_engine() {
         Ok(Some(claim)) => claim,
         Ok(None) => return 3,
@@ -60,7 +64,6 @@ fn run(restore: bool) -> i32 {
     if restore && !system::load_settings().effect.is_custom() {
         return 0;
     }
-    let Ok(stop) = system::open_stop_event() else { return 4 };
     let Ok(mut bus) = PawnIoBus::open() else { return 5 };
     let found = sticks(&mut bus);
     if found.is_empty() {

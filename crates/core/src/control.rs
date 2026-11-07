@@ -52,7 +52,7 @@ pub fn engine_path() -> Result<PathBuf, u32> {
 
 /// True while an engine holds its claim.
 pub fn engine_running() -> bool {
-    matches!(system::claim_engine(), Ok(None))
+    system::engine_claimed()
 }
 
 /// Asks a running engine to stop and waits until its claim is gone.
