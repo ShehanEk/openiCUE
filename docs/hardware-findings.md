@@ -88,3 +88,11 @@ Commands (admin terminal): `hwtest save breathing`, `Start-Process openicue-engi
 ## 2026-11-07: Dependency scan
 
 `cargo audit` (cargo-audit 0.22.2, 1,422 advisories) scanned the 13 crates in `Cargo.lock`: no vulnerabilities, exit code 0.
+
+## 2026-11-07: Stage 7, synchronous PawnIO handle and reply-size check
+
+Commit `6b68d14`: PawnIO is now opened with `SYNCHRONIZE` and `FILE_SYNCHRONOUS_IO_NONALERT`, and every reply must be exactly the requested size.
+
+- **`hwtest info`:** all 4 sticks report product `0x0101`, protocol 4, with no `ShortReply`. Pass.
+- **`hwtest effect rainbow-wave`:** `Ok(())` on all 4 sticks. The `reg 0x30` busy lines are the same as before. Pass.
+- **Engine `--restore` from a non-admin Command Prompt:** exit code `9` ("couldn't create the engine lock"). Before this change it was 3. Pass.
