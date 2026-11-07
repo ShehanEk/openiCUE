@@ -3,6 +3,7 @@ use crate::actions::{self, Startup};
 use crate::paint::Painter;
 use openicue::layout::{self, Layout, Target};
 use openicue::model::{Model, Screen};
+use openicue_core::costs::Cost;
 use openicue_core::effects::Rgb;
 use openicue_core::{control, system};
 use std::ptr::{null, null_mut};
@@ -56,8 +57,27 @@ impl App {
                 self.hardware = Some(hardware);
             }
         }
-        let effect = self.model.settings.effect;
-        self.model.running = (control::engine_running() && effect.is_custom()).then_some(effect);
+    }
+}
+
+/// Matches `running` and the cost timer to whether an engine holds its claim.
+/// The engine runs the saved effect, which may differ from the one on screen.
+fn sync_running(hwnd: HWND) {
+    let saved = system::load_settings().effect;
+    let running = (control::engine_running() && saved.is_custom()).then_some(saved);
+    let Some(a) = app(hwnd) else { return };
+    if running != a.model.running {
+        a.model.live = None;
+        a.last_sample = None;
+    }
+    a.model.running = running;
+    // SAFETY: plain calls on our own window.
+    unsafe {
+        if running.is_some() {
+            SetTimer(hwnd, TIMER_COST, COST_MS, None);
+        } else {
+            KillTimer(hwnd, TIMER_COST);
+        }
     }
 }
 
@@ -105,80 +125,68 @@ fn show_now(hwnd: HWND, message: &str) {
     unsafe { UpdateWindow(hwnd) };
 }
 
+/// Sets the status line after an action. Every outcome, success or not,
+/// re-reads whether an engine runs, so the window never shows a stale state.
+fn finish(hwnd: HWND, result: Result<(), String>, ok_message: &str) {
+    sync_running(hwnd);
+    if let Some(a) = app(hwnd) {
+        a.model.message = match result {
+            Ok(()) => ok_message.to_string(),
+            Err(e) => e,
+        };
+    }
+}
+
 fn apply(hwnd: HWND) {
     let Some(a) = app(hwnd) else { return };
     let settings = a.model.settings;
     if settings.effect.is_custom() {
+        show_now(hwnd, "Starting…");
         let result = actions::apply_custom(&settings);
-        let Some(a) = app(hwnd) else { return };
-        match result {
-            Ok(()) => {
-                a.model.running = Some(settings.effect);
-                a.model.live = None;
-                a.last_sample = None;
-                a.model.message = "Running in the background".to_string();
-                // SAFETY: plain call on our own window.
-                unsafe { SetTimer(hwnd, TIMER_COST, COST_MS, None) };
-            }
-            Err(e) => a.model.message = e,
-        }
+        finish(hwnd, result, "Running in the background");
         return;
     }
     show_now(hwnd, "Applying…");
-    let Some(a) = app(hwnd) else { return };
-    let Some(hardware) = a.hardware.as_mut() else { return };
-    let result = hardware.apply_builtin(&settings);
-    match result {
-        Ok(()) => {
-            a.model.running = None;
-            a.model.live = None;
-            a.model.message = "Applied. You can close this window".to_string();
-            // SAFETY: plain call on our own window.
-            unsafe { KillTimer(hwnd, TIMER_COST) };
-        }
-        Err(e) => a.model.message = e,
-    }
+    let result = match app(hwnd).and_then(|a| a.hardware.as_mut()) {
+        Some(hardware) => hardware.apply_builtin(&settings),
+        None => Err("Couldn't reach the RAM. Check again.".to_string()),
+    };
+    finish(hwnd, result, "Applied. You can close this window");
 }
 
 fn stop(hwnd: HWND) {
+    show_now(hwnd, "Stopping…");
     let result = actions::stop();
-    let Some(a) = app(hwnd) else { return };
-    match result {
-        Ok(()) => {
-            a.model.running = None;
-            a.model.live = None;
-            a.model.message = "Background process stopped".to_string();
-            // SAFETY: plain call on our own window.
-            unsafe { KillTimer(hwnd, TIMER_COST) };
-        }
-        Err(e) => a.model.message = e,
-    }
+    finish(hwnd, result, "Background process stopped");
+}
+
+fn tenth(x: f32) -> f32 {
+    (x * 10.0).round() / 10.0
 }
 
 /// Every 2 s while an effect runs: measure the engine and remember the cost.
+/// Whether it runs comes from its claim; a failed measurement only skips a sample.
 fn sample_cost(hwnd: HWND) {
+    if !control::engine_running() {
+        // The engine exited by itself, for example after repeated bus errors.
+        finish(hwnd, Ok(()), "Background process stopped");
+        return;
+    }
     let Some(a) = app(hwnd) else { return };
     let Some(effect) = a.model.running else { return };
-    match control::sample_engine() {
-        None => {
-            // The engine exited by itself, for example after repeated bus errors.
-            a.model.running = None;
-            a.model.live = None;
-            a.model.message = "Background process stopped".to_string();
-            // SAFETY: plain call on our own window.
-            unsafe { KillTimer(hwnd, TIMER_COST) };
-        }
-        Some(sample) => {
-            if let Some(previous) = a.last_sample {
-                let processors = std::thread::available_parallelism().map_or(1, |n| n.get());
-                let cost = control::cost_between(&previous, &sample, processors);
-                a.model.live = Some(cost);
-                a.model.costs.set(effect, cost);
-                let _ = system::save_costs(&a.model.costs);
-            }
-            a.last_sample = Some(sample);
+    let Some(sample) = control::sample_engine() else { return };
+    if let Some(previous) = a.last_sample {
+        let processors = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let cost = control::cost_between(&previous, &sample, processors);
+        a.model.live = Some(cost);
+        // Saved as shown, and only when it changes, so the file isn't rewritten every 2 s.
+        let shown = Cost { mb: tenth(cost.mb), cpu: tenth(cost.cpu) };
+        if a.model.costs.get(effect) != Some(shown) {
+            a.model.costs.set(effect, shown);
+            let _ = system::save_costs(&a.model.costs);
         }
     }
+    a.last_sample = Some(sample);
 }
 
 fn click(hwnd: HWND, target: Target) {
@@ -201,6 +209,7 @@ fn click(hwnd: HWND, target: Target) {
             if let Some(a) = app(hwnd) {
                 a.check();
             }
+            sync_running(hwnd);
         }
         Target::Apply => apply(hwnd),
         Target::Stop => stop(hwnd),
@@ -367,9 +376,7 @@ pub fn run() -> i32 {
             GdiplusShutdown(token);
             return 1;
         }
-        if (*raw).model.running.is_some() {
-            SetTimer(hwnd, TIMER_COST, COST_MS, None);
-        }
+        sync_running(hwnd);
 
         let scale = GetDpiForWindow(hwnd) as f32 / 96.0;
         (*raw).scale = scale;

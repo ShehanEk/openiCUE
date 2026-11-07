@@ -56,11 +56,25 @@ impl Hardware {
     }
 }
 
-/// Saves the effect, then starts a fresh engine to run it.
+/// How long a fresh engine gets to claim its lock before we call it failed.
+const START_TIMEOUT: Duration = Duration::from_secs(1);
+const START_POLL: Duration = Duration::from_millis(50);
+
+/// Saves the effect, then starts a fresh engine and waits until it is really
+/// running, since the process can exit at once (codes 3, 5, 6, 9).
 pub fn apply_custom(settings: &Settings) -> Result<(), String> {
+    const NOT_STARTED: &str = "The background process didn't start. Try again.";
     stop_first()?;
     system::save_settings(settings).map_err(|_| "Couldn't save the effect.".to_string())?;
-    control::start_engine().map_err(|_| "Couldn't start the background process.".to_string())
+    control::start_engine().map_err(|_| NOT_STARTED.to_string())?;
+    let deadline = std::time::Instant::now() + START_TIMEOUT;
+    while !control::engine_running() {
+        if std::time::Instant::now() >= deadline {
+            return Err(NOT_STARTED.to_string());
+        }
+        std::thread::sleep(START_POLL);
+    }
+    Ok(())
 }
 
 pub fn stop() -> Result<(), String> {
