@@ -1,4 +1,4 @@
-//! The last measured cost of each custom effect, shown before the user applies it.
+//! The last measured cost of each background effect, shown before the user applies it.
 use crate::effects::{Effect, ALL_EFFECTS};
 
 pub const MAX_COSTS_BYTES: usize = 256;
@@ -21,9 +21,10 @@ impl Costs {
         self.entries.iter().find(|(e, _)| *e == effect).map(|(_, cost)| *cost)
     }
 
-    /// Ignores built-in effects, which cost nothing once applied, and impossible values.
+    /// Ignores Static, which never runs in the background, and impossible values.
+    /// Other built-ins have a cost when kept in sync in software.
     pub fn set(&mut self, effect: Effect, cost: Cost) {
-        if !effect.is_custom() || !valid(cost) {
+        if effect == Effect::Static || !valid(cost) {
             return;
         }
         match self.entries.iter_mut().find(|(e, _)| *e == effect) {
@@ -59,7 +60,7 @@ pub fn parse(text: &str) -> Option<Costs> {
     let mut costs = Costs::default();
     for line in lines {
         let (name, values) = line.split_once('=')?;
-        let effect = Effect::from_name(name).filter(|e| e.is_custom())?;
+        let effect = Effect::from_name(name).filter(|e| *e != Effect::Static)?;
         if costs.get(effect).is_some() {
             return None;
         }
@@ -103,7 +104,7 @@ mod tests {
     }
 
     #[test]
-    fn set_replaces_and_ignores_built_in_or_invalid() {
+    fn set_replaces_and_ignores_static_or_invalid() {
         let mut costs = sample();
         costs.set(Effect::Breathing, Cost { mb: 2.0, cpu: 1.0 });
         assert_eq!(costs.get(Effect::Breathing), Some(Cost { mb: 2.0, cpu: 1.0 }));
@@ -112,6 +113,14 @@ mod tests {
         costs.set(Effect::Gradient, Cost { mb: f32::NAN, cpu: 1.0 });
         costs.set(Effect::Gradient, Cost { mb: 1.0, cpu: 101.0 });
         assert_eq!(costs.get(Effect::Gradient), None);
+        costs.set(Effect::ColorWave, Cost { mb: 1.2, cpu: 0.7 });
+        assert_eq!(costs.get(Effect::ColorWave), Some(Cost { mb: 1.2, cpu: 0.7 }), "synced built-ins are measured");
+    }
+
+    #[test]
+    fn parses_synced_built_in_costs() {
+        let costs = parse("version=1\ncolor-wave=1.2,0.7\n").unwrap();
+        assert_eq!(costs.get(Effect::ColorWave), Some(Cost { mb: 1.2, cpu: 0.7 }));
     }
 
     #[test]

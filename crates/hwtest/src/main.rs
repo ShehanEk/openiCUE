@@ -108,7 +108,7 @@ fn sync(bus: &mut dyn Bus, chosen: Effect) {
     let mut failures = 0;
     while start.elapsed() < SYNC_TEST {
         let frame_start = std::time::Instant::now();
-        let frame = openicue::preview::colors(&settings, start.elapsed().as_secs_f32());
+        let frame = openicue_core::frames::render(&settings, start.elapsed().as_secs_f32());
         for (info, leds) in infos.iter().zip(frame.iter()) {
             if ram::write_direct(bus, info, leds).is_err() {
                 failures += 1;

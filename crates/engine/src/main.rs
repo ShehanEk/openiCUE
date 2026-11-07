@@ -2,7 +2,8 @@
 //!
 //! Exit codes, readable through `Start-Process -Wait -PassThru`:
 //! - 0: built-in effect applied (`--run`) or already kept by the sticks
-//!   (`--restore`), or a custom effect stopped on request
+//!   (`--restore`), or an effect drawn in software (custom, or a built-in
+//!   kept in sync) stopped on request
 //! - 2: missing, unknown or extra arguments
 //! - 3: another engine is already running
 //! - 4: could not open the stop event
@@ -60,8 +61,9 @@ fn run(restore: bool) -> i32 {
     };
     // The sticks keep built-in effects through restarts and power-off
     // (hardware stage 5), and every rewrite saves to their own memory,
-    // so a logon restore only has work to do for custom effects.
-    if restore && !system::load_settings().effect.is_custom() {
+    // so a logon restore only has work to do for effects drawn in software:
+    // custom effects and built-ins kept in sync.
+    if restore && !system::load_settings().runs_in_software() {
         return 0;
     }
     let Ok(mut bus) = PawnIoBus::open() else { return 5 };
@@ -70,7 +72,7 @@ fn run(restore: bool) -> i32 {
         return 6;
     }
     let settings = system::load_settings();
-    if settings.effect.is_custom() {
+    if settings.runs_in_software() {
         animate(&mut bus, &found, &settings, &stop)
     } else {
         // Try every stick, even after one fails.
@@ -86,6 +88,7 @@ fn note_write(failures_in_a_row: &mut u32, ok: bool) -> bool {
     *failures_in_a_row >= MAX_FAILED_WRITES
 }
 
+/// Draws custom effects, and built-ins kept in sync, from one clock.
 /// Only the first `frames::STICKS_IN_FRAME` (4) detected sticks animate,
 /// because a frame holds colors for 4 sticks; the `zip` drops the rest.
 fn animate(bus: &mut dyn Bus, found: &[StickInfo], settings: &Settings, stop: &system::StopEvent) -> i32 {

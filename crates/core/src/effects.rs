@@ -58,6 +58,11 @@ impl Effect {
         matches!(self, Effect::ColorShift | Effect::ColorPulse | Effect::ColorWave
             | Effect::Visor | Effect::Rain | Effect::Sequential)
     }
+    /// Built-ins that animate can be drawn in software from one clock, so the
+    /// sticks stay in sync. Custom effects always are; Static doesn't animate.
+    pub fn allows_sync(self) -> bool {
+        !self.is_custom() && self != Effect::Static
+    }
     pub fn has_speed(self) -> bool {
         self != Effect::Static
     }
@@ -113,6 +118,8 @@ pub struct Settings {
     pub random: bool,
     pub speed: Speed,
     pub direction: Direction,
+    /// Draw a built-in effect in software, like a custom effect, so the sticks stay in sync.
+    pub synced: bool,
 }
 
 impl Default for Settings {
@@ -124,6 +131,7 @@ impl Default for Settings {
             random: false,
             speed: Speed::Slow,
             direction: Direction::Down,
+            synced: false,
         }
     }
 }
@@ -138,7 +146,15 @@ impl Settings {
         if !directions.is_empty() && !directions.contains(&self.direction) {
             self.direction = directions[0];
         }
+        if !self.effect.allows_sync() {
+            self.synced = false;
+        }
         self
+    }
+
+    /// True when the background engine draws the effect, rather than the RAM.
+    pub fn runs_in_software(&self) -> bool {
+        self.effect.is_custom() || self.synced
     }
 }
 
@@ -205,5 +221,25 @@ mod tests {
             effect: Effect::Rainbow, random: true, ..Settings::default()
         }.normalized();
         assert!(!settings.random);
+
+        let synced = |effect| Settings { effect, synced: true, ..Settings::default() }.normalized().synced;
+        assert!(!synced(Effect::Static));
+        assert!(!synced(Effect::Chase));
+        assert!(synced(Effect::ColorWave));
+    }
+
+    #[test]
+    fn every_animated_built_in_allows_sync() {
+        assert_eq!(ALL_EFFECTS.iter().filter(|e| e.allows_sync()).count(), 9);
+        assert!(!Effect::Static.allows_sync() && !Effect::Breathing.allows_sync());
+    }
+
+    #[test]
+    fn custom_or_synced_effects_run_in_software() {
+        let s = |effect, synced| Settings { effect, synced, ..Settings::default() };
+        assert!(s(Effect::Chase, false).runs_in_software());
+        assert!(s(Effect::ColorWave, true).runs_in_software());
+        assert!(!s(Effect::ColorWave, false).runs_in_software());
+        assert!(!s(Effect::Static, false).runs_in_software());
     }
 }

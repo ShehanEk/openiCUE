@@ -477,7 +477,7 @@ mod tests {
             let mut bus = FakeBus::default();
             let settings = Settings {
                 effect, random, direction, speed: Speed::Fast,
-                color1: Rgb(1, 2, 3), color2: Rgb(4, 5, 6),
+                color1: Rgb(1, 2, 3), color2: Rgb(4, 5, 6), synced: false,
             };
             apply_builtin(&mut bus, &stick(4), &settings).unwrap();
             assert_eq!(writes(&bus), buffer_writes(&packet(head), 1), "{effect:?} random={random}");
