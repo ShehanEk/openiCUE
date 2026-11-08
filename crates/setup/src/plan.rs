@@ -50,9 +50,34 @@ pub fn uninstall_values(dir: &Path, size_kb: u32) -> Vec<(&'static str, Value)> 
     ]
 }
 
+/// True when `path` is somewhere below `dir`. Windows paths ignore case, and
+/// a `\\?\` prefix on either side is ignored.
+pub fn is_inside(path: &Path, dir: &Path) -> bool {
+    fn parts(p: &Path) -> Vec<String> {
+        let text = p.to_string_lossy();
+        let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
+        text.split(['\\', '/']).filter(|s| !s.is_empty()).map(str::to_lowercase).collect()
+    }
+    let (path, dir) = (parts(path), parts(dir));
+    path.len() > dir.len() && path.starts_with(&dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_inside_ignores_case_and_needs_whole_folder_names() {
+        let dir = Path::new(r"C:\Program Files\openiCUE");
+        assert!(is_inside(Path::new(r"C:\Program Files\openiCUE\setup.exe"), dir));
+        assert!(is_inside(Path::new(r"c:\program files\OPENICUE\setup.exe"), dir));
+        assert!(is_inside(Path::new(r"\\?\C:\Program Files\openiCUE\setup.exe"), dir), "verbatim prefix");
+        assert!(is_inside(Path::new(r"C:\Program Files\openiCUE\sub\x.exe"), dir));
+        assert!(!is_inside(Path::new(r"C:\Program Files\openiCUE2\setup.exe"), dir), "a sibling is not inside");
+        assert!(!is_inside(Path::new(r"C:\Users\me\Downloads\openiCUE-Setup.exe"), dir));
+        assert!(!is_inside(Path::new(r"C:\Program Files\openiCUE"), dir), "the folder itself is not a file in it");
+        assert!(!is_inside(Path::new(r"D:\Program Files\openiCUE\setup.exe"), dir));
+    }
     use std::path::Path;
 
     #[test]

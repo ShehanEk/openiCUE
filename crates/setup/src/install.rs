@@ -6,7 +6,7 @@ use openicue_setup::payload;
 use openicue_setup::plan::{self, Value};
 use openicue_setup::verify::{hex, is_signed, sha256, PAWNIO_SHA256};
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::fs::MetadataExt;
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::ptr::null;
@@ -61,6 +61,48 @@ fn remove_tree(path: &Path) -> std::io::Result<()> {
     } else {
         std::fs::remove_dir_all(path)
     }
+}
+
+/// Opens every file in `dir` for writing with no sharing, so a running
+/// openiCUE (or anything else holding a file) is found before anything is
+/// deleted. Links and folders aren't opened, so nothing is followed; `skip`
+/// is Setup's own running copy. Drop the returned handles before deleting.
+fn lock_files(dir: &Path, skip: Option<&Path>) -> Result<Vec<std::fs::File>, ()> {
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err(()),
+    };
+    let mut held = Vec::new();
+    for entry in entries {
+        let path = entry.map_err(|_| ())?.path();
+        let meta = std::fs::symlink_metadata(&path).map_err(|_| ())?;
+        if meta.is_dir() || is_reparse_point(&path) || skip.is_some_and(|s| same_file(s, &path)) {
+            continue;
+        }
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .share_mode(0)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&path)
+            .map_err(|_| ())?;
+        held.push(file);
+    }
+    Ok(held)
+}
+
+/// True when both paths name the same file, compared after resolving them.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// This program's path, resolved, for comparing with the install folder.
+fn current_exe() -> Option<PathBuf> {
+    std::env::current_exe().ok().map(|p| std::fs::canonicalize(&p).unwrap_or(p))
 }
 
 /// Writes `bytes` to `path`, then reads it back and compares SHA-256.
@@ -199,6 +241,10 @@ fn install(report: &impl Fn(Event)) -> Result<(), Failure> {
         return Err(Failure::PawnIoCheck);
     }
     let dir = install_dir()?;
+    // The copy in the install folder would delete itself half way.
+    if current_exe().is_some_and(|exe| plan::is_inside(&exe, &dir)) {
+        return Err(other("Run the downloaded openiCUE Setup, not the copy in Program Files."));
+    }
     let self_bytes = std::env::current_exe()
         .and_then(std::fs::read)
         .map_err(|_| other("Setup couldn't read itself. Nothing was changed."))?;
@@ -209,6 +255,9 @@ fn install(report: &impl Fn(Event)) -> Result<(), Failure> {
     if is_reparse_point(&dir) {
         return Err(other(r"C:\Program Files\openiCUE is a link. Remove it, then run Setup again."));
     }
+    // Every file must be free before the first one is deleted.
+    let held = lock_files(&dir, None).map_err(|_| other("Close openiCUE, then run Setup again."))?;
+    drop(held);
     remove_tree(&dir).map_err(|_| other("Close openiCUE, then run Setup again."))?;
     std::fs::create_dir(&dir).map_err(|_| other("Setup couldn't create its folder."))?;
     write_checked(&dir.join("openicue.exe"), payload::APP)?;
@@ -336,9 +385,14 @@ pub fn run_uninstall(remove_pawnio: bool, report: impl Fn(Event)) {
 fn uninstall(remove_pawnio: bool) -> Result<(), Failure> {
     let dir = install_dir()?;
     let _ = control::stop_engine(Duration::from_secs(2));
-    if remove_pawnio {
-        run_pawnio(&dir, &["-uninstall", "-silent"])?;
+    if is_reparse_point(&dir) {
+        return Err(other(r"C:\Program Files\openiCUE is a link. Remove it, then uninstall again."));
     }
+    // A running openiCUE is reported before anything is removed. Our own
+    // running setup.exe is the one file that may stay open.
+    let held = lock_files(&dir, current_exe().as_deref())
+        .map_err(|_| other("Close openiCUE, then uninstall again. Nothing was removed."))?;
+    drop(held);
     // Missing pieces are fine: uninstall must work on a half-installed PC.
     let _ = schtasks(&["/Delete", "/TN", plan::TASK_NAME, "/F"]);
     if let Ok(programs) = system::known_folder(&FOLDERID_CommonPrograms) {
@@ -358,10 +412,23 @@ fn uninstall(remove_pawnio: bool) -> Result<(), Failure> {
             }
         }
     }
+    // PawnIO last, so its failure can't skip the cleanup above. Its setup
+    // runs from the admin-only install folder, recreated if it was missing.
+    let pawnio = if remove_pawnio {
+        std::fs::create_dir_all(&dir)
+            .map_err(|_| other("Setup couldn't create its folder to remove PawnIO."))
+            .and_then(|()| run_pawnio(&dir, &["-uninstall", "-silent"]))
+    } else {
+        Ok(())
+    };
     for path in [dir.join("setup.exe"), dir.clone()] {
         let w: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
         // SAFETY: NUL-terminated path; a null target means delete.
         unsafe { MoveFileExW(w.as_ptr(), std::ptr::null(), MOVEFILE_DELAY_UNTIL_REBOOT) };
     }
-    Ok(())
+    // The rest is gone by now, so the message says so.
+    pawnio.map_err(|failure| match failure {
+        Failure::PawnIoCheck => other("openiCUE was removed, but the PawnIO file failed its security check, so it was not run. PawnIO is still installed."),
+        Failure::Other(_) => other("openiCUE was removed, but the PawnIO driver wasn't. Remove PawnIO from Installed apps."),
+    })
 }

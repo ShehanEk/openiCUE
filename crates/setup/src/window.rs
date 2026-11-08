@@ -5,7 +5,8 @@ use crate::paint::Painter;
 use openicue_core::system;
 use openicue_gdi::wide;
 use openicue_setup::layout::{self, Layout, Target};
-use openicue_setup::model::{Model, Screen};
+use openicue_setup::model::{Failure, Model, Screen};
+use std::panic::AssertUnwindSafe;
 use std::ptr::{null, null_mut};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::Instant;
@@ -75,12 +76,19 @@ fn start_work(hwnd: HWND, work: impl FnOnce(Box<dyn Fn(Event)>) + Send + 'static
     let sender = a.sender.clone();
     let window = hwnd as isize;
     std::thread::spawn(move || {
-        work(Box::new(move |event| {
+        let post = move |event: Event| {
             let _ = sender.send(event);
             // SAFETY: PostMessageW may be called from any thread; a stale
             // handle only makes it fail.
             unsafe { PostMessageW(window as HWND, WM_APP_EVENT, 0, 0) };
-        }))
+        };
+        // A panic must not leave the window stuck on Progress. (Release
+        // builds abort on panic, which closes Setup instead.)
+        let report = post.clone();
+        let result = std::panic::catch_unwind(AssertUnwindSafe(move || work(Box::new(report))));
+        if result.is_err() {
+            post(Event::Failed(Failure::Other("Setup hit an unexpected error. Run it again.".into())));
+        }
     });
 }
 
@@ -290,6 +298,16 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             // Progress, so the window must not close then.
             if !on_progress(hwnd) {
                 close(hwnd);
+            }
+            0
+        }
+        WM_ENDSESSION => {
+            // Logoff or shutdown: the process may end without WM_DESTROY,
+            // so put the picker's lights out now.
+            if wparam != 0 {
+                if let Some(a) = app(hwnd) {
+                    a.picker = None;
+                }
             }
             0
         }
