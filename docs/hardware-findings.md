@@ -129,3 +129,15 @@ On the user's board, address order is physical slots 1, 3, 2, 4. Software can't 
   - The picker lit one stick white at a time.
   - Save stored the order and restored the effect.
   - Synced Sequential and Chase now run slot 1 → 4 in order.
+
+## 2026-11-08: Stage 9, Setup in Windows Sandbox
+
+Builds: `openiCUE-Setup.exe` (4,591,616 bytes, SHA-256 `9A4337DF…`, commit `36d6499`) and a `tamper-test` copy.
+
+- **Results:** the user reports every check passed:
+  - the tampered copy stops with the PawnIO security message and installs nothing;
+  - a clean install creates the Start menu entry, the Installed apps entry and the PawnIO service;
+  - a reinstall skips PawnIO;
+  - uninstall keeps PawnIO with the box off and removes it with the box on.
+- **PawnIO switches:** the silent switches `-install -silent` and `-uninstall -silent` work.
+- **Before the build:** an engine started from the window at 9:08 survived the window's Stop. The admin `hwtest stop` ended it. Re-check the window's Stop at stage 10.
