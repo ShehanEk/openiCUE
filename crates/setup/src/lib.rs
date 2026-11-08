@@ -2,4 +2,5 @@
 pub mod layout;
 pub mod model;
 pub mod payload;
+pub mod plan;
 pub mod verify;

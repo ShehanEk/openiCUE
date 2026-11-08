@@ -218,10 +218,15 @@ fn require_admin_only_folder(handle: HANDLE) -> Result<(), u32> {
 
 /// The ProgramData folder from the shell, not from an environment variable.
 fn program_data() -> Result<PathBuf, u32> {
+    known_folder(&FOLDERID_ProgramData)
+}
+
+/// A known folder from the shell, not from an environment variable.
+pub fn known_folder(id: &windows_sys::core::GUID) -> Result<PathBuf, u32> {
     let mut raw: PWSTR = null_mut();
-    // SAFETY: the GUID is a static; a null token means the current user;
-    // `raw` is a valid out pointer.
-    let status = unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramData, 0, null_mut(), &mut raw) };
+    // SAFETY: `id` is a valid GUID reference; a null token means the current
+    // user; `raw` is a valid out pointer.
+    let status = unsafe { SHGetKnownFolderPath(id, 0, null_mut(), &mut raw) };
     let result = if status < 0 || raw.is_null() {
         Err(status as u32)
     } else {
