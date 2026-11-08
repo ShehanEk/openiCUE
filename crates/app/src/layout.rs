@@ -10,22 +10,7 @@ const CONTENT_RIGHT: f32 = WIDTH - SIDE;
 const BOTTOM: f32 = HEIGHT - 24.0;
 const PILL_H: f32 = 44.0;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
-}
-
-impl Rect {
-    pub fn contains(&self, x: f32, y: f32) -> bool {
-        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
-    }
-    pub fn right(&self) -> f32 {
-        self.x + self.w
-    }
-}
+pub use openicue_gdi::Rect;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Font {

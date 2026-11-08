@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/engine", "crates/hwtest", "crates/app"]
+members = ["crates/core", "crates/engine", "crates/hwtest", "crates/app", "crates/gdi"]
 
 [profile.release]
 opt-level = "z"

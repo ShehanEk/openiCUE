@@ -12,7 +12,7 @@ use std::time::Instant;
 use windows_sys::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
 use windows_sys::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, UpdateWindow, PAINTSTRUCT};
-use windows_sys::Win32::Graphics::GdiPlus::{GdiplusShutdown, GdiplusStartup, GdiplusStartupInput};
+use openicue_gdi::wide;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::Dialogs::{ChooseColorW, CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW};
 use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
@@ -26,10 +26,6 @@ const COST_MS: u32 = 2000;
 const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
 const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
 const DWMWCP_ROUND: u32 = 2;
-
-pub fn rgb_wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(std::iter::once(0)).collect()
-}
 
 pub struct App {
     pub model: Model,
@@ -457,14 +453,12 @@ pub fn run() -> i32 {
     // live locals or statics, and every handle belongs to this process.
     unsafe {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        let mut token = 0usize;
-        let input = GdiplusStartupInput { GdiplusVersion: 1, DebugEventCallback: 0, SuppressBackgroundThread: 0, SuppressExternalCodecs: 0 };
-        if GdiplusStartup(&mut token, &input, null_mut()) != 0 {
-            return 1;
-        }
+        // Lives until after the message loop; the App (and its canvas) is
+        // dropped at WM_NCDESTROY, inside the loop.
+        let Some(gdi) = openicue_gdi::GdiPlus::start() else { return 1 };
 
         let instance = GetModuleHandleW(null());
-        let class = rgb_wide("openiCUE.Window");
+        let class = wide("openiCUE.Window");
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             style: CS_HREDRAW | CS_VREDRAW,
@@ -496,7 +490,7 @@ pub fn run() -> i32 {
         let raw = Box::into_raw(app);
         (*raw).check();
 
-        let title = rgb_wide("openiCUE");
+        let title = wide("openiCUE");
         let hwnd = CreateWindowExW(WS_EX_APPWINDOW, class.as_ptr(), title.as_ptr(),
             WS_POPUP | WS_SYSMENU | WS_MINIMIZEBOX, 0, 0, layout::WIDTH as i32, layout::HEIGHT as i32,
             null_mut(), null_mut(), instance, raw.cast());
@@ -504,7 +498,7 @@ pub fn run() -> i32 {
             // Leak `raw` on purpose: if WM_NCCREATE ran before creation failed,
             // WM_NCDESTROY has already freed it, so freeing here could be a
             // double free. The process exits right after.
-            GdiplusShutdown(token);
+            drop(gdi);
             return 1;
         }
         sync_running(hwnd);
@@ -528,7 +522,7 @@ pub fn run() -> i32 {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-        GdiplusShutdown(token);
+        drop(gdi);
         0
     }
 }
