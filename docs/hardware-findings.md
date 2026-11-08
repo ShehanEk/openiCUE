@@ -119,3 +119,13 @@ The window (`target\release\openicue.exe`, commit `4bfd399`) ran through the 6 c
   - **On:** Color pulse runs in software with all sticks in sync, the cost is shown live, and the Stop button appears.
   - **Off:** the RAM runs Color pulse itself at 0 MB · 0% CPU, and the background process stops.
   - **Static:** shows no toggle.
+
+## 2026-11-08: Stick order (Settings → Stick order → Change)
+
+On the user's board, address order is physical slots 1, 3, 2, 4. Software can't learn slot positions, so the user picks the slot of each lit stick once.
+
+- **Build:** `437caf2`, `2e7ac7b`.
+- **User test:** all checks passed.
+  - The picker lit one stick white at a time.
+  - Save stored the order and restored the effect.
+  - Synced Sequential and Chase now run slot 1 → 4 in order.

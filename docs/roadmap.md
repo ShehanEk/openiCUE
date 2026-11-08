@@ -37,3 +37,4 @@
 - **2026-11-07:** the window's effect settings sit under a divider with a "<effect> settings" label, a user change from the original design. The design canvas is updated to match.
 - **2026-11-07:** CPU % is shown as a share of all logical processors, like Task Manager.
 - **2026-11-08:** built-in effects get a "Keep sticks in sync" toggle (not Static). Off: the RAM runs them at 0% CPU and the sticks drift apart, because no hardware sync exists. On: the engine draws them in software, in sync, for about 1.5 MB · 0.8% CPU. Settings file is now version 2 (`synced=`); version 1 still loads.
+- **2026-11-08:** effects drawn in software follow a saved physical stick order (`order.txt`). The user sets it in Setup and can change it under Settings → Stick order. Nothing can detect slot positions automatically.
