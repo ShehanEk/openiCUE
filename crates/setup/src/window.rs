@@ -2,6 +2,7 @@
 //! worker thread's events.
 use crate::install::{self, Event};
 use crate::paint::Painter;
+use openicue_core::system;
 use openicue_gdi::wide;
 use openicue_setup::layout::{self, Layout, Target};
 use openicue_setup::model::{Model, Screen};
@@ -34,6 +35,9 @@ pub struct App {
     pub sender: Sender<Event>,
     /// True once Uninstall is pressed, so `Done` shows the Removed screen.
     pub uninstalling: bool,
+    /// The driver, engine claim and sticks while the stick-order picker is
+    /// open. Dropping it sets the sticks black and releases the claim.
+    pub picker: Option<install::Picker>,
 }
 
 impl App {
@@ -82,27 +86,101 @@ fn start_work(hwnd: HWND, work: impl FnOnce(Box<dyn Fn(Event)>) + Send + 'static
 
 /// Drains the worker's events into the model.
 fn on_events(hwnd: HWND) {
-    let Some(a) = app(hwnd) else { return };
-    while let Ok(event) = a.events.try_recv() {
-        match event {
-            Event::Step(i) => a.model.step = i,
-            Event::Done => {
-                a.model.step = 4;
-                a.model.screen = if a.uninstalling { Screen::Removed } else { Screen::Done };
-            }
-            Event::Failed(failure) => {
-                a.model.screen = Screen::Failed;
-                a.model.failure = Some(failure);
+    let mut installed = false;
+    if let Some(a) = app(hwnd) {
+        while let Ok(event) = a.events.try_recv() {
+            match event {
+                Event::Step(i) => a.model.step = i,
+                Event::Done if a.uninstalling => {
+                    a.model.step = 4;
+                    a.model.screen = Screen::Removed;
+                }
+                Event::Done => {
+                    // Stays on Progress, all ticked, until the picker is decided.
+                    a.model.step = 4;
+                    installed = true;
+                }
+                Event::Failed(failure) => {
+                    a.model.screen = Screen::Failed;
+                    a.model.failure = Some(failure);
+                }
             }
         }
     }
     invalidate(hwnd);
+    if installed {
+        // Show the ticked steps while the RAM is read, then ask the stick
+        // order, or go straight to Done when there is nothing to ask.
+        // SAFETY: plain call on our own window; no App borrow is live.
+        unsafe { UpdateWindow(hwnd) };
+        let picker = install::Picker::begin();
+        if let Some(a) = app(hwnd) {
+            match picker {
+                Some(picker) => {
+                    a.model.start_arrange(picker.count());
+                    a.picker = Some(picker);
+                }
+                None => a.model.screen = Screen::Done,
+            }
+        }
+        invalidate(hwnd);
+    }
+}
+
+/// Leaves the picker: drops it, which sets the sticks black and releases
+/// the claim, then shows Done.
+fn end_picker(hwnd: HWND) {
+    if let Some(a) = app(hwnd) {
+        a.picker = None;
+        a.model.screen = Screen::Done;
+    }
+}
+
+/// Lights `stick` white. If that fails, the picker ends without saving, so
+/// the user is never asked about a stick that isn't lit.
+fn light(hwnd: HWND, stick: usize) {
+    let lit = app(hwnd).and_then(|a| a.picker.as_mut()).is_some_and(|p| p.light(stick).is_ok());
+    if !lit {
+        end_picker(hwnd);
+    }
+}
+
+/// Close, Esc and Alt+F4: put the lights out first if the picker is open.
+fn close(hwnd: HWND) {
+    if let Some(a) = app(hwnd) {
+        a.picker = None;
+    }
+    destroy(hwnd);
 }
 
 fn click(hwnd: HWND, target: Target) {
-    let Some(screen) = app(hwnd).map(|a| a.model.screen) else { return };
+    let Some((screen, done)) = app(hwnd).map(|a| (a.model.screen, a.model.arrange_done())) else { return };
     match (target, screen) {
-        (Target::Close | Target::Secondary, _) => return destroy(hwnd),
+        (Target::Close, _) => return close(hwnd),
+        (Target::Slot(slot), Screen::Arrange) => {
+            let next = app(hwnd).and_then(|a| if a.model.pick_slot(slot) { a.model.lit_stick() } else { None });
+            if let Some(next) = next {
+                light(hwnd, next);
+            }
+        }
+        (Target::Secondary, Screen::Arrange) if done => {
+            if let Some(a) = app(hwnd) {
+                a.model.start_over();
+            }
+            light(hwnd, 0);
+        }
+        // Skip: nothing is saved.
+        (Target::Secondary, Screen::Arrange) => end_picker(hwnd),
+        (Target::Primary, Screen::Arrange) if done => {
+            // A failed save only loses the order; the user can set it
+            // again in openiCUE's Settings.
+            if let Some(order) = app(hwnd).and_then(|a| a.model.arrange_result()) {
+                let _ = system::save_order(&order);
+            }
+            end_picker(hwnd);
+        }
+        (Target::Slot(_), _) | (Target::Primary, Screen::Arrange) => {}
+        (Target::Secondary, _) => return destroy(hwnd),
         (Target::RemovePawnIo, _) => {
             if let Some(a) = app(hwnd) {
                 a.model.remove_pawnio = !a.model.remove_pawnio;
@@ -119,7 +197,7 @@ fn click(hwnd: HWND, target: Target) {
             start_work(hwnd, move |report| install::run_uninstall(remove_pawnio, report));
         }
         (Target::Primary, Screen::Done) => {
-            // Closing is right either way; a failed start leaves Start menu.
+            // Close either way: if the start fails, openiCUE is in the Start menu.
             let _ = install::open_app();
             return destroy(hwnd);
         }
@@ -195,7 +273,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
         WM_KEYDOWN => {
             // Esc closes, except while files are being changed.
             if wparam == VK_ESCAPE as usize && !on_progress(hwnd) {
-                destroy(hwnd);
+                close(hwnd);
             }
             0
         }
@@ -211,7 +289,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             // Alt+F4 and the taskbar. Files are half-changed during
             // Progress, so the window must not close then.
             if !on_progress(hwnd) {
-                destroy(hwnd);
+                close(hwnd);
             }
             0
         }
@@ -270,6 +348,7 @@ pub fn run(uninstall: bool) -> i32 {
             events,
             sender,
             uninstalling: false,
+            picker: None,
         });
         let raw = Box::into_raw(app);
 

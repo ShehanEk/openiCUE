@@ -12,6 +12,10 @@ const PILL: u32 = 0xFF17191D;
 const PILL_TEXT: u32 = 0xFFC9CED3;
 /// The Failed screen's first LED.
 const ORANGE: Rgb = Rgb(0xFF, 0xB0, 0x66);
+/// Picker slots: the outline, an empty slot's body and its unlit bar.
+const SLOT_EDGE: u32 = 0xFF2A2D33;
+const SLOT_EMPTY: u32 = 0xFF121418;
+const SLOT_BAR_OFF: u32 = 0xFF1E2126;
 /// Alpha at the centre of an LED glow.
 const GLOW_ALPHA: u8 = 0x55;
 
@@ -24,13 +28,14 @@ const fn spec(family: &'static str, size: f32, bold: bool) -> FontSpec {
 }
 
 /// Setup's fonts, in `Font` order.
-const FONTS: [FontSpec; 6] = [
+const FONTS: [FontSpec; 7] = [
     spec("Segoe UI Semibold", 13.0, false),
     spec("Segoe UI", 14.0, false),
     spec("Segoe UI", 14.0, true),
     spec("Segoe UI", 13.0, false),
     spec("Segoe UI", 12.0, false),
     spec("Segoe UI Light", 28.0, false),
+    spec("Segoe UI Light", 22.0, false),
 ];
 
 fn index(font: Font) -> usize {
@@ -41,6 +46,7 @@ fn index(font: Font) -> usize {
         Font::Small => 3,
         Font::Hint => 4,
         Font::Heading => 5,
+        Font::SlotNumber => 6,
     }
 }
 
@@ -86,7 +92,9 @@ impl Painter {
             c.line(g, MUTED, 1.2, &[(cx - 5.5, cy - 5.5), (cx + 5.5, cy + 5.5)]);
             c.line(g, MUTED, 1.2, &[(cx + 5.5, cy - 5.5), (cx - 5.5, cy + 5.5)]);
         }
-        self.strip(g, model, l.strip, seconds);
+        if let Some(strip) = l.strip {
+            self.strip(g, model, strip, seconds);
+        }
         self.text(g, model.heading(), Font::Heading, l.heading, FG, Align::Near);
 
         let content = l.content;
@@ -104,6 +112,14 @@ impl Painter {
                 for (i, name) in STEPS.iter().enumerate() {
                     let row = Rect { y: content.y + i as f32 * 26.0, h: 26.0, ..content };
                     self.step(g, model.step_state(i), name, row);
+                }
+            }
+            Screen::Arrange => {
+                if let Some(r) = l.progress {
+                    self.text(g, &model.arrange_progress(), Font::Hint, r, MUTED, Align::Near);
+                }
+                if let Some(body) = model.body() {
+                    self.wrapped(g, &body, Font::Body, content, MUTED);
                 }
             }
             Screen::Done | Screen::Failed | Screen::Removed => {
@@ -205,6 +221,44 @@ impl Painter {
                 c.rounded(g, r, 22.0, PILL);
                 self.text(g, model.secondary().unwrap_or(""), Font::Body, r, FG, Align::Center);
             }
+            Target::Slot(slot) => self.picker_slot(g, model, r, slot),
         }
+    }
+
+    /// A slot's outline and fill. Returns the area inside the 1 px outline.
+    fn slot_body(&self, g: Graphics, r: Rect, radius: f32, fill: u32) -> Rect {
+        self.canvas.rounded(g, r, radius, SLOT_EDGE);
+        let inner = Rect { x: r.x + 1.0, y: r.y + 1.0, w: r.w - 2.0, h: r.h - 2.0 };
+        self.canvas.rounded(g, inner, radius - 1.0, fill);
+        inner
+    }
+
+    /// The LED bar across the top of a slot, rounded only at the top.
+    fn slot_bar(&self, g: Graphics, inner: Rect, height: f32, radius: f32, color: u32, fill: u32) {
+        self.canvas.rounded(g, Rect { h: height + radius, ..inner }, radius, color);
+        self.canvas.rounded(g, Rect { y: inner.y + height, h: radius, ..inner }, 0.0, fill);
+    }
+
+    /// One picker slot, as the window's: a body with an 8 px LED bar and
+    /// the stick number once placed, then "Slot i" underneath.
+    fn picker_slot(&self, g: Graphics, model: &Model, r: Rect, slot: usize) {
+        let stick = model.slot_stick(slot);
+        let fill = if stick.is_some() { PILL } else { SLOT_EMPTY };
+        let label = Rect { x: r.x, y: r.y + r.h - 17.0, w: r.w, h: 17.0 };
+        let inner = self.slot_body(g, Rect { h: label.y - 10.0 - r.y, ..r }, 6.0, fill);
+        let bar = Rect { h: 8.0, ..inner };
+        match stick {
+            Some(stick) => {
+                let color = model::stick_color(stick);
+                // The glow stays inside the slot, as the design clips it.
+                self.canvas.clipped(g, inner, || self.canvas.glow(g, bar, argb(color, GLOW_ALPHA)));
+                self.slot_bar(g, inner, 8.0, 5.0, argb(color, 0xFF), fill);
+                let below = Rect { y: inner.y + 8.0, h: inner.h - 8.0, ..inner };
+                self.text(g, &(stick + 1).to_string(), Font::SlotNumber, below, FG, Align::Center);
+            }
+            None => self.slot_bar(g, inner, 8.0, 5.0, SLOT_BAR_OFF, fill),
+        }
+        let color = if stick.is_some() { FG } else { MUTED };
+        self.text(g, &format!("Slot {}", slot + 1), Font::Hint, label, color, Align::Center);
     }
 }

@@ -1,5 +1,6 @@
 //! The work Setup does. Runs on a worker thread; reports through `report`.
-use openicue_core::{control, system};
+use openicue_core::pawnio::PawnIoBus;
+use openicue_core::{control, ram, system};
 use openicue_setup::model::Failure;
 use openicue_setup::payload;
 use openicue_setup::plan::{self, Value};
@@ -272,6 +273,57 @@ pub fn open_app() -> Result<(), Failure> {
         CloseHandle(info.hProcess);
     }
     Ok(())
+}
+
+/// Held while the stick-order picker is open: the driver, the engine claim
+/// (so no other openiCUE process writes to the RAM meanwhile) and the
+/// sticks being placed. Runs on the window thread only.
+pub struct Picker {
+    bus: PawnIoBus,
+    sticks: Vec<ram::StickInfo>,
+    _claim: system::EngineClaim,
+}
+
+impl Picker {
+    /// Opens the driver, takes the claim, reads the sticks and lights the
+    /// first one white. `None` means skip the picker: the driver can't be
+    /// opened (PawnIO may need a restart), an engine holds the claim, fewer
+    /// than 2 sticks answer, a saved order already fits, or the first light
+    /// fails.
+    pub fn begin() -> Option<Picker> {
+        let mut bus = PawnIoBus::open().ok()?;
+        let claim = system::claim_engine().ok()??;
+        let sticks: Vec<ram::StickInfo> = ram::detect(&mut bus)
+            .into_iter()
+            .filter_map(|addr| ram::read_info(&mut bus, addr).ok())
+            .collect();
+        if sticks.len() < 2 || system::load_order().is_some_and(|order| order.fits(sticks.len())) {
+            return None;
+        }
+        let mut picker = Picker { bus, sticks, _claim: claim };
+        // On failure, dropping `picker` sets the sticks black.
+        picker.light(0).ok()?;
+        Some(picker)
+    }
+
+    pub fn count(&self) -> usize {
+        self.sticks.len()
+    }
+
+    /// Lights `stick` (address order) white and the others black.
+    pub fn light(&mut self, stick: usize) -> Result<(), ()> {
+        ram::light_only(&mut self.bus, &self.sticks, stick).map_err(|_| ())
+    }
+}
+
+impl Drop for Picker {
+    /// Sets every stick black while the claim is still held; the fields,
+    /// claim and driver included, are released right after. Setup doesn't
+    /// re-apply an effect: the window or the logon task does that.
+    fn drop(&mut self) {
+        // No index matches `usize::MAX`, so every stick gets black.
+        let _ = ram::light_only(&mut self.bus, &self.sticks, usize::MAX);
+    }
 }
 
 pub fn run_uninstall(remove_pawnio: bool, report: impl Fn(Event)) {

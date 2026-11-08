@@ -1,5 +1,6 @@
 //! What each Setup screen says and offers. Pure, so it is tested.
 pub use openicue_core::effects::Rgb;
+use openicue_core::order::StickOrder;
 
 /// CSS `hsl(hue, saturation, lightness)`, with saturation and lightness
 /// from 0 to 1. Copied from the window's `stick_color`, not shared.
@@ -28,6 +29,13 @@ pub enum Screen {
     Failed,
     Uninstall,
     Removed,
+    /// After installing: "Which slot is lit?", once per stick.
+    Arrange,
+}
+
+/// A stick's color in the picker: `hsl(200 + 40 * stick, 90%, 58%)`.
+pub fn stick_color(stick: usize) -> Rgb {
+    hsl(200.0 + 40.0 * stick as f32, 0.9, 0.58)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,11 +66,15 @@ pub struct Model {
     pub step: usize,
     pub failure: Option<Failure>,
     pub remove_pawnio: bool,
+    /// How many sticks the picker places.
+    pub sticks: usize,
+    /// In the picker: `picks[k]` is the slot chosen for stick `k`.
+    pub picks: Vec<usize>,
 }
 
 impl Model {
     pub fn installing() -> Model {
-        Model { screen: Screen::Welcome, step: 0, failure: None, remove_pawnio: false }
+        Model { screen: Screen::Welcome, step: 0, failure: None, remove_pawnio: false, sticks: 0, picks: Vec::new() }
     }
 
     pub fn uninstalling() -> Model {
@@ -84,6 +96,8 @@ impl Model {
             Screen::Failed => "Setup stopped",
             Screen::Uninstall => "Uninstall openiCUE",
             Screen::Removed => "openiCUE is removed",
+            Screen::Arrange if self.arrange_done() => "Stick order saved",
+            Screen::Arrange => "Which slot is lit?",
         }
     }
 
@@ -97,6 +111,8 @@ impl Model {
             }),
             Screen::Uninstall => Some("Removes the app, the logon task and your settings.".into()),
             Screen::Removed => Some("The app, the logon task and your settings are gone. A leftover folder is removed when you next restart.".into()),
+            Screen::Arrange if self.arrange_done() => Some("Effects that move between sticks now travel in this order. Numbers show which stick sits in each slot.".into()),
+            Screen::Arrange => Some("One stick on your PC is glowing white. Pick its slot, counting left to right as you look at your RAM.".into()),
             _ => None,
         }
     }
@@ -107,7 +123,8 @@ impl Model {
             Screen::Done => Some("Open openiCUE"),
             Screen::Failed | Screen::Removed => Some("Close"),
             Screen::Uninstall => Some("Uninstall"),
-            Screen::Progress => None,
+            Screen::Arrange if self.arrange_done() => Some("Continue"),
+            Screen::Progress | Screen::Arrange => None,
         }
     }
 
@@ -115,12 +132,71 @@ impl Model {
         match self.screen {
             Screen::Welcome | Screen::Uninstall => Some("Cancel"),
             Screen::Done => Some("Close"),
+            Screen::Arrange if self.arrange_done() => Some("Start over"),
+            Screen::Arrange => Some("Skip"),
             _ => None,
         }
     }
 
     pub fn hint(&self) -> &'static str {
-        if self.screen == Screen::Progress { "This usually takes under a minute." } else { "" }
+        match self.screen {
+            Screen::Progress => "This usually takes under a minute.",
+            Screen::Arrange => "You can change this later in openiCUE.",
+            _ => "",
+        }
+    }
+
+    /// Opens the picker for `sticks` sticks, with nothing placed yet.
+    pub fn start_arrange(&mut self, sticks: usize) {
+        self.screen = Screen::Arrange;
+        self.sticks = sticks;
+        self.picks.clear();
+    }
+
+    /// Places the lit stick in `slot`. Taken or unknown slots are ignored.
+    /// When one stick is left, it fills the last free slot. Returns true if
+    /// anything changed.
+    pub fn pick_slot(&mut self, slot: usize) -> bool {
+        if self.arrange_done() || slot >= self.sticks || self.picks.contains(&slot) {
+            return false;
+        }
+        self.picks.push(slot);
+        if self.picks.len() + 1 == self.sticks {
+            if let Some(last) = (0..self.sticks).find(|s| !self.picks.contains(s)) {
+                self.picks.push(last);
+            }
+        }
+        true
+    }
+
+    pub fn arrange_done(&self) -> bool {
+        self.sticks > 0 && self.picks.len() == self.sticks
+    }
+
+    pub fn start_over(&mut self) {
+        self.picks.clear();
+    }
+
+    /// The stick to light white: the first one not placed yet.
+    pub fn lit_stick(&self) -> Option<usize> {
+        (!self.arrange_done()).then_some(self.picks.len())
+    }
+
+    /// The stick placed in `slot` so far, if any.
+    pub fn slot_stick(&self, slot: usize) -> Option<usize> {
+        self.picks.iter().position(|&s| s == slot)
+    }
+
+    pub fn arrange_result(&self) -> Option<StickOrder> {
+        if self.arrange_done() { StickOrder::from_picks(&self.picks) } else { None }
+    }
+
+    pub fn arrange_progress(&self) -> String {
+        if self.arrange_done() {
+            format!("All {} sticks placed", self.sticks)
+        } else {
+            format!("Stick {} of {}", self.picks.len() + 1, self.sticks)
+        }
     }
 
     pub fn step_state(&self, i: usize) -> StepState {
@@ -147,6 +223,67 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn picker(n: usize) -> Model {
+        let mut m = Model::installing();
+        m.start_arrange(n);
+        m
+    }
+
+    #[test]
+    fn picker_asks_for_each_stick_with_skip() {
+        let m = picker(4);
+        assert_eq!(m.screen, Screen::Arrange);
+        assert_eq!(m.window_title(), "openiCUE Setup");
+        assert_eq!(m.arrange_progress(), "Stick 1 of 4");
+        assert_eq!(m.heading(), "Which slot is lit?");
+        assert_eq!(m.body().unwrap(), "One stick on your PC is glowing white. Pick its slot, counting left to right as you look at your RAM.");
+        assert_eq!((m.primary(), m.secondary()), (None, Some("Skip")));
+        assert_eq!(m.hint(), "You can change this later in openiCUE.");
+        assert_eq!(m.lit_stick(), Some(0));
+        assert_eq!(m.lit_leds(), 0);
+        assert!(m.arrange_result().is_none());
+    }
+
+    #[test]
+    fn picks_ignore_taken_and_unknown_slots_and_fill_the_last() {
+        let mut m = picker(4);
+        assert!(m.pick_slot(0));
+        assert_eq!((m.lit_stick(), m.arrange_progress().as_str()), (Some(1), "Stick 2 of 4"));
+        assert!(!m.pick_slot(0), "a taken slot is ignored");
+        assert!(!m.pick_slot(4), "no such slot");
+        assert_eq!((m.slot_stick(0), m.slot_stick(1)), (Some(0), None));
+        assert!(m.pick_slot(2));
+        assert!(m.pick_slot(1), "the third pick also places the last stick");
+        assert_eq!(m.picks, vec![0, 2, 1, 3]);
+        assert!(m.arrange_done());
+        assert_eq!(m.lit_stick(), None);
+        assert!(!m.pick_slot(3), "nothing left to pick");
+        assert_eq!(m.arrange_result(), StickOrder::from_picks(&[0, 2, 1, 3]));
+        assert_eq!((0..4).map(|s| m.slot_stick(s)).collect::<Vec<_>>(), [Some(0), Some(2), Some(1), Some(3)]);
+    }
+
+    #[test]
+    fn done_picker_offers_start_over_and_continue() {
+        let mut m = picker(2);
+        assert!(m.pick_slot(1), "with two sticks one pick places both");
+        assert_eq!(m.picks, vec![1, 0]);
+        assert_eq!(m.arrange_progress(), "All 2 sticks placed");
+        assert_eq!(m.heading(), "Stick order saved");
+        assert_eq!(m.body().unwrap(), "Effects that move between sticks now travel in this order. Numbers show which stick sits in each slot.");
+        assert_eq!((m.primary(), m.secondary()), (Some("Continue"), Some("Start over")));
+        assert_eq!(m.hint(), "You can change this later in openiCUE.");
+        m.start_over();
+        assert!(m.picks.is_empty());
+        assert_eq!((m.lit_stick(), m.secondary()), (Some(0), Some("Skip")));
+    }
+
+    #[test]
+    fn stick_colors_follow_the_design_hues() {
+        assert_eq!(stick_color(0), Rgb(52, 180, 244));
+        assert_eq!(stick_color(1), Rgb(52, 52, 244));
+        assert_eq!(stick_color(4), Rgb(244, 52, 52), "360 wraps to red");
+    }
 
     #[test]
     fn hsl_matches_css() {
