@@ -1,0 +1,309 @@
+//! The frameless Setup window: messages, DPI, the timer, clicks, and the
+//! worker thread's events.
+use crate::install::{self, Event};
+use crate::paint::Painter;
+use openicue_gdi::wide;
+use openicue_setup::layout::{self, Layout, Target};
+use openicue_setup::model::{Model, Screen};
+use std::ptr::{null, null_mut};
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::time::Instant;
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
+use windows_sys::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, ScreenToClient, UpdateWindow, PAINTSTRUCT};
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
+use windows_sys::Win32::UI::WindowsAndMessaging::*;
+
+const WM_APP_EVENT: u32 = WM_APP + 1;
+const TIMER_ANIMATE: usize = 1;
+const ANIMATE_MS: u32 = 90;
+const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
+const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+const DWMWCP_ROUND: u32 = 2;
+
+pub struct App {
+    pub model: Model,
+    pub painter: Painter,
+    pub layout: Option<Layout>,
+    pub start: Instant,
+    pub scale: f32,
+    /// Install or uninstall events from the worker thread.
+    pub events: Receiver<Event>,
+    pub sender: Sender<Event>,
+    /// True once Uninstall is pressed, so `Done` shows the Removed screen.
+    pub uninstalling: bool,
+}
+
+impl App {
+    fn seconds(&self) -> f32 {
+        (self.start.elapsed().as_secs_f64() % 86_400.0) as f32
+    }
+}
+
+/// The App lives in GWLP_USERDATA from WM_NCCREATE until WM_NCDESTROY.
+/// Borrow it only briefly: never across a call that runs a message loop or
+/// destroys the window.
+fn app<'a>(hwnd: HWND) -> Option<&'a mut App> {
+    // SAFETY: the pointer is either null or the leaked Box set in WM_NCCREATE.
+    unsafe { (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut App).as_mut() }
+}
+
+fn invalidate(hwnd: HWND) {
+    // SAFETY: plain call on our own window.
+    unsafe { InvalidateRect(hwnd, null(), 0) };
+}
+
+fn destroy(hwnd: HWND) {
+    // SAFETY: plain call on our own window. It frees the App (WM_NCDESTROY),
+    // so no App borrow may be live here.
+    unsafe { DestroyWindow(hwnd) };
+}
+
+/// Moves to Progress and runs `work` on a worker thread. The thread only
+/// sends events and posts WM_APP_EVENT; the window handle crosses as an
+/// `isize`, since `HWND` is not `Send`.
+fn start_work(hwnd: HWND, work: impl FnOnce(Box<dyn Fn(Event)>) + Send + 'static) {
+    let Some(a) = app(hwnd) else { return };
+    a.model.screen = Screen::Progress;
+    a.model.step = 0;
+    let sender = a.sender.clone();
+    let window = hwnd as isize;
+    std::thread::spawn(move || {
+        work(Box::new(move |event| {
+            let _ = sender.send(event);
+            // SAFETY: PostMessageW may be called from any thread; a stale
+            // handle only makes it fail.
+            unsafe { PostMessageW(window as HWND, WM_APP_EVENT, 0, 0) };
+        }))
+    });
+}
+
+/// Drains the worker's events into the model.
+fn on_events(hwnd: HWND) {
+    let Some(a) = app(hwnd) else { return };
+    while let Ok(event) = a.events.try_recv() {
+        match event {
+            Event::Step(i) => a.model.step = i,
+            Event::Done => {
+                a.model.step = 4;
+                a.model.screen = if a.uninstalling { Screen::Removed } else { Screen::Done };
+            }
+            Event::Failed(failure) => {
+                a.model.screen = Screen::Failed;
+                a.model.failure = Some(failure);
+            }
+        }
+    }
+    invalidate(hwnd);
+}
+
+fn click(hwnd: HWND, target: Target) {
+    let Some(screen) = app(hwnd).map(|a| a.model.screen) else { return };
+    match (target, screen) {
+        (Target::Close | Target::Secondary, _) => return destroy(hwnd),
+        (Target::RemovePawnIo, _) => {
+            if let Some(a) = app(hwnd) {
+                a.model.remove_pawnio = !a.model.remove_pawnio;
+            }
+        }
+        (Target::Primary, Screen::Welcome) => {
+            start_work(hwnd, |report| install::run_install(report));
+        }
+        (Target::Primary, Screen::Uninstall) => {
+            let Some(remove_pawnio) = app(hwnd).map(|a| {
+                a.uninstalling = true;
+                a.model.remove_pawnio
+            }) else { return };
+            start_work(hwnd, move |report| install::run_uninstall(remove_pawnio, report));
+        }
+        (Target::Primary, Screen::Done) => {
+            // Closing is right either way; a failed start leaves Start menu.
+            let _ = install::open_app();
+            return destroy(hwnd);
+        }
+        (Target::Primary, Screen::Failed | Screen::Removed) => return destroy(hwnd),
+        (Target::Primary, Screen::Progress) => {}
+    }
+    invalidate(hwnd);
+}
+
+fn logical(hwnd: HWND, lparam: LPARAM) -> (f32, f32) {
+    let x = (lparam & 0xFFFF) as i16 as f32;
+    let y = ((lparam >> 16) & 0xFFFF) as i16 as f32;
+    let scale = app(hwnd).map_or(1.0, |a| a.scale);
+    (x / scale, y / scale)
+}
+
+fn on_progress(hwnd: HWND) -> bool {
+    app(hwnd).is_some_and(|a| a.model.screen == Screen::Progress)
+}
+
+unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    match msg {
+        WM_NCCREATE => {
+            let create = &*(lparam as *const CREATESTRUCTW);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, create.lpCreateParams as isize);
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_NCHITTEST => {
+            let hit = DefWindowProcW(hwnd, msg, wparam, lparam);
+            if hit != HTCLIENT as LRESULT {
+                return hit;
+            }
+            let mut point = POINT { x: (lparam & 0xFFFF) as i16 as i32, y: ((lparam >> 16) & 0xFFFF) as i16 as i32 };
+            ScreenToClient(hwnd, &mut point);
+            let Some(a) = app(hwnd) else { return hit };
+            let (x, y) = (point.x as f32 / a.scale, point.y as f32 / a.scale);
+            match &a.layout {
+                Some(l) if layout::is_drag_area(l, x, y) => HTCAPTION as LRESULT,
+                _ => hit,
+            }
+        }
+        WM_PAINT => {
+            let mut ps: PAINTSTRUCT = std::mem::zeroed();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            if let Some(a) = app(hwnd) {
+                let mut rect: RECT = std::mem::zeroed();
+                GetClientRect(hwnd, &mut rect);
+                let seconds = a.seconds();
+                a.layout = Some(a.painter.paint(hdc, rect.right, rect.bottom, a.scale, &a.model, seconds));
+            }
+            EndPaint(hwnd, &ps);
+            0
+        }
+        WM_ERASEBKGND => 1,
+        WM_TIMER => {
+            if wparam == TIMER_ANIMATE {
+                invalidate(hwnd);
+            }
+            0
+        }
+        WM_APP_EVENT => {
+            on_events(hwnd);
+            0
+        }
+        WM_LBUTTONUP => {
+            let (x, y) = logical(hwnd, lparam);
+            let target = app(hwnd).and_then(|a| a.layout.as_ref().and_then(|l| layout::hit(l, x, y)));
+            if let Some(target) = target {
+                click(hwnd, target);
+            }
+            0
+        }
+        WM_KEYDOWN => {
+            // Esc closes, except while files are being changed.
+            if wparam == VK_ESCAPE as usize && !on_progress(hwnd) {
+                destroy(hwnd);
+            }
+            0
+        }
+        WM_DPICHANGED => {
+            if let Some(a) = app(hwnd) {
+                a.scale = (wparam & 0xFFFF) as f32 / 96.0;
+            }
+            let r = &*(lparam as *const RECT);
+            SetWindowPos(hwnd, null_mut(), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
+            0
+        }
+        WM_CLOSE => {
+            // Alt+F4 and the taskbar. Files are half-changed during
+            // Progress, so the window must not close then.
+            if !on_progress(hwnd) {
+                destroy(hwnd);
+            }
+            0
+        }
+        WM_DESTROY => {
+            PostQuitMessage(0);
+            0
+        }
+        WM_NCDESTROY => {
+            let raw = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut App;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            if !raw.is_null() {
+                drop(Box::from_raw(raw));
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+pub fn run(uninstall: bool) -> i32 {
+    // SAFETY: all calls below are standard window setup; pointers are to
+    // live locals or statics, and every handle belongs to this process.
+    unsafe {
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        // Lives until after the message loop; the App (and its canvas) is
+        // dropped at WM_NCDESTROY, inside the loop.
+        let Some(gdi) = openicue_gdi::GdiPlus::start() else { return 1 };
+
+        let instance = GetModuleHandleW(null());
+        let class = wide("openiCUE.Setup");
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(window_proc),
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: instance,
+            hIcon: null_mut(),
+            hCursor: LoadCursorW(null_mut(), IDC_ARROW),
+            hbrBackground: null_mut(),
+            lpszMenuName: null(),
+            lpszClassName: class.as_ptr(),
+            hIconSm: null_mut(),
+        };
+        RegisterClassExW(&wc);
+
+        let model = if uninstall { Model::uninstalling() } else { Model::installing() };
+        let title = wide(model.window_title());
+        let (sender, events) = channel();
+        let app = Box::new(App {
+            model,
+            painter: Painter::new(),
+            layout: None,
+            start: Instant::now(),
+            scale: 1.0,
+            events,
+            sender,
+            uninstalling: false,
+        });
+        let raw = Box::into_raw(app);
+
+        let hwnd = CreateWindowExW(WS_EX_APPWINDOW, class.as_ptr(), title.as_ptr(),
+            WS_POPUP | WS_SYSMENU | WS_MINIMIZEBOX, 0, 0, layout::WIDTH as i32, layout::HEIGHT as i32,
+            null_mut(), null_mut(), instance, raw.cast());
+        if hwnd.is_null() {
+            // Leak `raw` on purpose: if WM_NCCREATE ran before creation failed,
+            // WM_NCDESTROY has already freed it, so freeing here could be a
+            // double free. The process exits right after.
+            drop(gdi);
+            return 1;
+        }
+
+        let scale = GetDpiForWindow(hwnd) as f32 / 96.0;
+        (*raw).scale = scale;
+        let (w, h) = ((layout::WIDTH * scale) as i32, (layout::HEIGHT * scale) as i32);
+        let (sw, sh) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+        SetWindowPos(hwnd, null_mut(), (sw - w) / 2, (sh - h) / 2, w, h, SWP_NOZORDER);
+
+        let on: u32 = 1;
+        DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, (&on as *const u32).cast(), 4);
+        DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, (&DWMWCP_ROUND as *const u32).cast(), 4);
+
+        SetTimer(hwnd, TIMER_ANIMATE, ANIMATE_MS, None);
+        ShowWindow(hwnd, SW_SHOW);
+        UpdateWindow(hwnd);
+
+        let mut msg: MSG = std::mem::zeroed();
+        while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        drop(gdi);
+        0
+    }
+}

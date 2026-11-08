@@ -1,4 +1,24 @@
 //! What each Setup screen says and offers. Pure, so it is tested.
+pub use openicue_core::effects::Rgb;
+
+/// CSS `hsl(hue, saturation, lightness)`, with saturation and lightness
+/// from 0 to 1. Copied from the window's `stick_color`, not shared.
+pub fn hsl(hue: f32, saturation: f32, lightness: f32) -> Rgb {
+    let hue = hue.rem_euclid(360.0) / 60.0;
+    let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+    let x = chroma * (1.0 - (hue.rem_euclid(2.0) - 1.0).abs());
+    let (r, g, b) = match hue as u32 {
+        0 => (chroma, x, 0.0),
+        1 => (x, chroma, 0.0),
+        2 => (0.0, chroma, x),
+        3 => (0.0, x, chroma),
+        4 => (x, 0.0, chroma),
+        _ => (chroma, 0.0, x),
+    };
+    let m = lightness - chroma / 2.0;
+    let channel = |v: f32| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    Rgb(channel(r), channel(g), channel(b))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
@@ -127,6 +147,15 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hsl_matches_css() {
+        assert_eq!(hsl(0.0, 0.9, 0.58), Rgb(244, 52, 52));
+        assert_eq!(hsl(200.0, 0.9, 0.58), Rgb(52, 180, 244));
+        assert_eq!(hsl(240.0, 0.9, 0.58), Rgb(52, 52, 244));
+        assert_eq!(hsl(360.0, 0.9, 0.58), hsl(0.0, 0.9, 0.58), "360 wraps to red");
+        assert_eq!(hsl(-40.0, 0.9, 0.58), hsl(320.0, 0.9, 0.58), "negative hues wrap");
+    }
 
     #[test]
     fn welcome_matches_the_design() {

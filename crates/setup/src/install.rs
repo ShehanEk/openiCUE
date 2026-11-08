@@ -8,7 +8,10 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::ptr::null;
 use std::time::Duration;
+use windows_sys::Win32::Foundation::CloseHandle;
+use windows_sys::Win32::System::Threading::{CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW};
 use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_DELAY_UNTIL_REBOOT};
 use windows_sys::Win32::System::Registry::{
     RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegSetValueExW, HKEY, HKEY_LOCAL_MACHINE,
@@ -232,6 +235,42 @@ fn install(report: &impl Fn(Event)) -> Result<(), Failure> {
     crate::shortcut::create(&programs.join("openiCUE.lnk"), &dir.join("openicue.exe"))
         .map_err(|_| other("Setup couldn't add openiCUE to the Start menu."))?;
     set_uninstall_entry(&dir)?;
+    Ok(())
+}
+
+/// "Open openiCUE": starts the installed window by full path, with no
+/// arguments, in its own folder.
+pub fn open_app() -> Result<(), Failure> {
+    let fail = || other("Setup couldn't start openiCUE.");
+    let dir = install_dir()?;
+    let exe = dir.join("openicue.exe");
+    let to_wide = |p: &Path| -> Vec<u16> { p.as_os_str().encode_wide().chain(std::iter::once(0)).collect() };
+    let application = to_wide(&exe);
+    let folder = to_wide(&dir);
+    let mut command: Vec<u16> = Vec::new();
+    command.push(u16::from(b'"'));
+    command.extend(exe.as_os_str().encode_wide());
+    command.push(u16::from(b'"'));
+    command.push(0);
+    // SAFETY: zeroed is a valid starting value for both plain C structs.
+    let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
+    startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+    // SAFETY: as above.
+    let mut info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: every string is NUL-terminated and outlives the call; `command`
+    // is writable as CreateProcessW requires; no handles are inherited.
+    let ok = unsafe {
+        CreateProcessW(application.as_ptr(), command.as_mut_ptr(), null(), null(), 0, 0,
+            null(), folder.as_ptr(), &startup, &mut info)
+    };
+    if ok == 0 {
+        return Err(fail());
+    }
+    // SAFETY: both handles came from the successful call and are closed once.
+    unsafe {
+        CloseHandle(info.hThread);
+        CloseHandle(info.hProcess);
+    }
     Ok(())
 }
 
