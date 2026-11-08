@@ -142,7 +142,7 @@ Builds: `openiCUE-Setup.exe` (4,591,616 bytes, SHA-256 `9A4337DF…`, commit `36
 - **PawnIO switches:** the silent switches `-install -silent` and `-uninstall -silent` work.
 - **Before the build:** an engine started from the window at 9:08 survived the window's Stop. The admin `hwtest stop` ended it. Re-check the window's Stop at stage 10.
 
-## 2026-11-08: Stage 10, real install (partial)
+## 2026-11-08: Stage 10, real install
 
 - **Install:** the user installed `openiCUE-Setup.exe` (`9A4337DF…`) and opened openiCUE. The user reports "all ok".
-- **Not confirmed yet:** the window's Stop after a restarted engine, and restore at logon (Breathing after a restart, with no UAC prompt).
+- **Stop and restore (confirmed):** the window's Stop works, and restore at logon works: Breathing comes back after a restart, with no window and no UAC prompt. Stage 10 passed.
