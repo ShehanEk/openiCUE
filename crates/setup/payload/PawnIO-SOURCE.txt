@@ -1,0 +1,5 @@
+openiCUE Setup includes the official, unmodified PawnIO 2.2.0 setup
+(SHA-256 1F519A22E47187F70A1379A48CA604981C4FCF694F4E65B734AAA74A9FBA3032).
+PawnIO is free software under the GNU General Public License version 2;
+see LICENSE-PawnIO.txt. Its complete source code is published at
+https://github.com/namazso/PawnIO and https://pawnio.eu
