@@ -1,6 +1,6 @@
 //! Where everything goes, in logical pixels (96 DPI). Pure, so it is tested.
-use crate::model::{self, Model, Screen, SPEEDS};
-use openicue_core::effects::{Direction, Effect, Speed};
+use crate::model::{self, Model, Screen, Slider, SPEEDS};
+use openicue_core::effects::{Direction, Effect, Speed, ALL_EFFECTS};
 
 pub const WIDTH: f32 = 840.0;
 pub const HEIGHT: f32 = 640.0;
@@ -42,7 +42,16 @@ pub enum Font {
 pub enum Target {
     Close,
     Effect(Effect),
+    /// Colour 1 to 4.
     Color(u8),
+    /// "+" after the colours, for software effects.
+    AddColor,
+    /// "−", which drops the last colour.
+    RemoveColor,
+    /// A slider's track: its rect is the 44 px tall hit area.
+    SpeedSlider,
+    BrightnessSlider,
+    Reverse,
     Random,
     /// "Keep sticks in sync", in the settings header.
     Sync,
@@ -64,10 +73,46 @@ pub enum Target {
     SaveOrder,
 }
 
+impl Target {
+    pub fn slider(self) -> Option<Slider> {
+        match self {
+            Target::SpeedSlider => Some(Slider::Speed),
+            Target::BrightnessSlider => Some(Slider::Brightness),
+            _ => None,
+        }
+    }
+}
+
+fn slider_target(slider: Slider) -> Target {
+    match slider {
+        Slider::Speed => Target::SpeedSlider,
+        Slider::Brightness => Target::BrightnessSlider,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Button {
     pub rect: Rect,
     pub target: Target,
+}
+
+/// A slider's text: its label on the left of the track, its value on the right.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SliderText {
+    pub slider: Slider,
+    pub label: Rect,
+    pub value: Rect,
+}
+
+/// How far along its track `value` sits, from 0 to 1.
+pub fn slider_fraction(value: u16, (min, max): (u16, u16)) -> f32 {
+    ((f32::from(value) - f32::from(min)) / f32::from(max - min)).clamp(0.0, 1.0)
+}
+
+/// The value at `x` on `track`, before snapping to a step.
+pub fn slider_value_at(track: Rect, x: f32, (min, max): (u16, u16)) -> f32 {
+    let k = ((x - track.x) / track.w).clamp(0.0, 1.0);
+    f32::from(min) + k * f32::from(max - min)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -77,8 +122,10 @@ pub struct Layout {
     pub status: Rect,
     /// The 4 x 10 LED grid, on the app screen only.
     pub preview: Option<Rect>,
-    pub builtin_label: Option<Rect>,
-    pub custom_label: Option<Rect>,
+    /// "Effects", above the one list of tiles.
+    pub effects_label: Option<Rect>,
+    /// The speed and brightness sliders' text.
+    pub sliders: Vec<SliderText>,
     /// A 1 px line between the effect tiles and the selected effect's settings.
     pub divider: Option<Rect>,
     /// "<effect> settings", so the options read as belonging to the selection.
@@ -138,8 +185,8 @@ pub fn layout(model: &Model, measure: &dyn Fn(&str, Font) -> f32) -> Layout {
         close,
         status: Rect { x: 200.0, y: 0.0, w: close.x - 12.0 - 200.0, h: TITLE_H },
         preview: None,
-        builtin_label: None,
-        custom_label: None,
+        effects_label: None,
+        sliders: Vec::new(),
         divider: None,
         settings_label: None,
         segment_groups: Vec::new(),
@@ -188,12 +235,9 @@ pub fn layout(model: &Model, measure: &dyn Fn(&str, Font) -> f32) -> Layout {
         let dot = if model.running == Some(e) { 15.0 } else { 0.0 };
         (Target::Effect(e), 36.0 + dot + measure(model::display_name(e), Font::Body))
     };
-    out.builtin_label = Some(Rect { x: SIDE, y, w: 300.0, h: 16.0 });
-    let tiles: Vec<(Target, f32)> = model::builtins().into_iter().map(tile).collect();
-    y = flow(&mut out.buttons, &tiles, y + 24.0) + 16.0;
-
-    out.custom_label = Some(Rect { x: SIDE, y, w: 300.0, h: 16.0 });
-    let tiles: Vec<(Target, f32)> = model::customs().into_iter().map(tile).collect();
+    // One list of every effect (2026-11-09).
+    out.effects_label = Some(Rect { x: SIDE, y, w: 300.0, h: 16.0 });
+    let tiles: Vec<(Target, f32)> = ALL_EFFECTS.into_iter().map(tile).collect();
     y = flow(&mut out.buttons, &tiles, y + 24.0) + 20.0;
 
     // The selected effect's settings, set apart from the tiles (user feedback,
@@ -211,7 +255,104 @@ pub fn layout(model: &Model, measure: &dyn Fn(&str, Font) -> f32) -> Layout {
     out.settings_label = Some(Rect { x: SIDE, y, w: label_right - SIDE, h: PILL_H });
     y += PILL_H + 8.0;
 
-    // Options row.
+    if model.soft_opts() {
+        soft_options(&mut out, model, measure, y);
+    } else {
+        ram_options(&mut out, model, measure, y);
+    }
+
+    // Bottom row: cost on the left, Stop and Apply on the right.
+    let w = 64.0 + measure(model.apply_label(), Font::BodyBold);
+    let apply = Rect { x: CONTENT_RIGHT - w, y: BOTTOM - PILL_H, w, h: PILL_H };
+    let mut left_of_buttons = apply.x;
+    if model.show_stop() {
+        let w = 40.0 + measure("Stop", Font::Body);
+        let stop = Rect { x: apply.x - 8.0 - w, y: apply.y, w, h: PILL_H };
+        out.buttons.push(Button { rect: stop, target: Target::Stop });
+        left_of_buttons = stop.x;
+    }
+    out.buttons.push(Button { rect: apply, target: Target::Apply });
+    let cost_w = left_of_buttons - 24.0 - SIDE;
+    out.cost_line = Some(Rect { x: SIDE, y: BOTTOM - 60.0, w: cost_w, h: 40.0 });
+    out.cost_body = Some(Rect { x: SIDE, y: BOTTOM - 18.0, w: cost_w, h: 18.0 });
+    out
+}
+
+/// A checkbox's width: 8 px padding, the 15 px box, 8 px, the label, 8 px.
+fn checkbox_w(label: &str, measure: &dyn Fn(&str, Font) -> f32) -> f32 {
+    8.0 + 15.0 + 8.0 + measure(label, Font::Body) + 8.0
+}
+
+/// Software effects and Static: colours, + and − and Random on one row,
+/// then the speed and brightness sliders, Reverse and Direction on the next.
+fn soft_options(out: &mut Layout, model: &Model, measure: &dyn Fn(&str, Font) -> f32, top: f32) {
+    // Row 1, items 4 px apart.
+    let mut x = SIDE;
+    let push = |out: &mut Layout, x: &mut f32, target, w| {
+        out.buttons.push(Button { rect: Rect { x: *x, y: top, w, h: PILL_H }, target });
+        *x += w + 4.0;
+    };
+    if model.show_soft_colors() {
+        for n in 1..=model.settings.color_count {
+            push(out, &mut x, Target::Color(n), 44.0);
+        }
+        // 32 px round buttons with 6 px around them, so the hit area is 44 px.
+        if model.can_add_color() {
+            push(out, &mut x, Target::AddColor, 44.0);
+        }
+        if model.can_remove_color() {
+            push(out, &mut x, Target::RemoveColor, 44.0);
+        }
+    }
+    if model.show_random() {
+        x += 12.0;
+        push(out, &mut x, Target::Random, checkbox_w("Random", measure));
+    }
+
+    // Row 2, items 24 px apart. A slider is its label, 10 px, the track,
+    // 10 px and a 36 px value.
+    let y = top + PILL_H + 8.0;
+    let mut sliders = Vec::new();
+    if model.show_speed_slider() {
+        sliders.push(Slider::Speed);
+    }
+    sliders.push(Slider::Brightness);
+    let label_w = |s: Slider| measure(s.label(), Font::Small);
+    let mut fixed: f32 = sliders.iter().map(|&s| label_w(s) + 10.0 + 10.0 + 36.0 + 24.0).sum();
+    let reverse_w = checkbox_w("Reverse", measure);
+    if model.show_reverse() {
+        fixed += reverse_w + 24.0;
+    }
+    let direction_items: Vec<(Target, f32)> = model
+        .directions()
+        .iter()
+        .map(|&d| (Target::Direction(d), 24.0 + measure(model::direction_name(d), Font::Segment)))
+        .collect();
+    if model.show_soft_direction() {
+        fixed += 4.0 + direction_items.iter().map(|i| i.1).sum::<f32>() + 24.0;
+    }
+    // The design's 140 px tracks, shorter only when the row wouldn't fit.
+    let track_w = ((CONTENT_RIGHT - SIDE + 24.0 - fixed) / sliders.len() as f32).clamp(40.0, 140.0);
+    let mut x = SIDE;
+    for slider in sliders {
+        let label = Rect { x, y, w: label_w(slider), h: PILL_H };
+        let track = Rect { x: label.right() + 10.0, y, w: track_w, h: PILL_H };
+        let value = Rect { x: track.right() + 10.0, y, w: 36.0, h: PILL_H };
+        out.buttons.push(Button { rect: track, target: slider_target(slider) });
+        out.sliders.push(SliderText { slider, label, value });
+        x = value.right() + 24.0;
+    }
+    if model.show_reverse() {
+        out.buttons.push(Button { rect: Rect { x, y, w: reverse_w, h: PILL_H }, target: Target::Reverse });
+        x += reverse_w + 24.0;
+    }
+    if model.show_soft_direction() {
+        segments(&mut out.buttons, &mut out.segment_groups, &direction_items, x, y);
+    }
+}
+
+/// The RAM's own animations: colours 1 and 2, Random, Slow/Medium/Fast and Direction.
+fn ram_options(out: &mut Layout, model: &Model, measure: &dyn Fn(&str, Font) -> f32, y: f32) {
     let mut x = SIDE;
     if model.show_colors() {
         let mut gap = 0.0;
@@ -248,22 +389,6 @@ pub fn layout(model: &Model, measure: &dyn Fn(&str, Font) -> f32) -> Layout {
             .collect();
         segments(&mut out.buttons, &mut out.segment_groups, &items, x, y);
     }
-
-    // Bottom row: cost on the left, Stop and Apply on the right.
-    let w = 64.0 + measure(model.apply_label(), Font::BodyBold);
-    let apply = Rect { x: CONTENT_RIGHT - w, y: BOTTOM - PILL_H, w, h: PILL_H };
-    let mut left_of_buttons = apply.x;
-    if model.show_stop() {
-        let w = 40.0 + measure("Stop", Font::Body);
-        let stop = Rect { x: apply.x - 8.0 - w, y: apply.y, w, h: PILL_H };
-        out.buttons.push(Button { rect: stop, target: Target::Stop });
-        left_of_buttons = stop.x;
-    }
-    out.buttons.push(Button { rect: apply, target: Target::Apply });
-    let cost_w = left_of_buttons - 24.0 - SIDE;
-    out.cost_line = Some(Rect { x: SIDE, y: BOTTOM - 60.0, w: cost_w, h: 40.0 });
-    out.cost_body = Some(Rect { x: SIDE, y: BOTTOM - 18.0, w: cost_w, h: 18.0 });
-    out
 }
 
 /// Lines of wrapped text, from 1 to 3, when `text` is set `width` wide.
@@ -412,7 +537,9 @@ mod tests {
 
     #[test]
     fn app_screen_has_all_thirteen_tiles_and_the_right_options() {
-        let l = layout(&app(Effect::ColorWave), &measure);
+        let mut m = app(Effect::ColorWave);
+        m.toggle_sync();
+        let l = layout(&m, &measure);
         let t = targets(&l);
         let tiles = t.iter().filter(|t| matches!(t, Target::Effect(_))).count();
         assert_eq!(tiles, 13);
@@ -439,6 +566,143 @@ mod tests {
                 assert!(apart, "Sync overlaps {:?}", b.target);
             }
         }
+    }
+
+    fn wide(t: &str, _: Font) -> f32 {
+        t.chars().count() as f32 * 14.0
+    }
+
+    /// Every effect, synced or not, with 1 to 4 colours, on the app screen.
+    fn every_option_state() -> Vec<Model> {
+        let mut out = Vec::new();
+        for effect in openicue_core::effects::ALL_EFFECTS {
+            for synced in [true, false] {
+                for colors in 1..=4u8 {
+                    for running in [None, Some(Effect::Chase), Some(effect)] {
+                        let mut m = app(effect);
+                        if !synced {
+                            m.toggle_sync();
+                        }
+                        m.settings.color_count = colors;
+                        m.settings = m.settings.normalized();
+                        m.running = running;
+                        out.push(m);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn options_fit_above_the_cost_for_every_effect_and_setting() {
+        for m in every_option_state() {
+            for (l, is_wide) in [(layout(&m, &measure), false), (layout(&m, &wide), true)] {
+                // The RAM's own row is unchanged, and at double-width text it was
+                // already wider than the window, so it is held to the narrow text only.
+                let ram_row_at_wide = is_wide && !m.soft_opts();
+                if !ram_row_at_wide {
+                    assert_fits_and_apart(&l);
+                }
+                let label = l.settings_label.unwrap();
+                let cost = l.cost_line.unwrap();
+                for b in l.buttons.iter().filter(|b| matches!(b.target,
+                    Target::Color(_) | Target::AddColor | Target::RemoveColor | Target::Random
+                    | Target::Speed(_) | Target::Direction(_) | Target::SpeedSlider
+                    | Target::BrightnessSlider | Target::Reverse)) {
+                    assert!(b.rect.y > label.y + label.h, "{:?} above its label", b.target);
+                    assert!(b.rect.y + b.rect.h <= cost.y, "{:?} hits the cost for {:?}", b.target, m.settings.effect);
+                    assert!(ram_row_at_wide || b.rect.right() <= CONTENT_RIGHT, "{:?} past the edge", b.target);
+                }
+                for s in &l.sliders {
+                    assert!(s.label.x >= SIDE && s.value.right() <= CONTENT_RIGHT, "{:?}", s.slider);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn one_effects_list_under_one_label() {
+        let l = layout(&app(Effect::Chase), &measure);
+        let label = l.effects_label.unwrap();
+        let tiles: Vec<Rect> = l.buttons.iter().filter(|b| matches!(b.target, Target::Effect(_))).map(|b| b.rect).collect();
+        assert_eq!(tiles.len(), 13);
+        assert!(tiles.iter().all(|t| t.y >= label.y + label.h));
+        let order: Vec<Target> = targets(&l).into_iter().filter(|t| matches!(t, Target::Effect(_))).collect();
+        let expected: Vec<Target> = openicue_core::effects::ALL_EFFECTS.into_iter().map(Target::Effect).collect();
+        assert_eq!(order, expected, "built-ins then customs, in one flow");
+    }
+
+    fn row_targets(m: &Model) -> Vec<Target> {
+        targets(&layout(m, &measure)).into_iter().filter(|t| !matches!(t,
+            Target::Close | Target::Settings | Target::Effect(_) | Target::Sync | Target::Apply | Target::Stop)).collect()
+    }
+
+    #[test]
+    fn software_effects_get_the_two_option_rows() {
+        use openicue_core::effects::Direction;
+        let m = app(Effect::ColorWave);
+        assert_eq!(row_targets(&m), vec![
+            Target::Color(1), Target::Color(2), Target::AddColor, Target::RemoveColor, Target::Random,
+            Target::SpeedSlider, Target::BrightnessSlider,
+            Target::Direction(Direction::Down), Target::Direction(Direction::Up),
+            Target::Direction(Direction::Left), Target::Direction(Direction::Right),
+        ]);
+        let mut m = app(Effect::Chase);
+        m.add_color();
+        m.add_color();
+        assert_eq!(row_targets(&m), vec![
+            Target::Color(1), Target::Color(2), Target::Color(3), Target::Color(4), Target::RemoveColor,
+            Target::SpeedSlider, Target::BrightnessSlider, Target::Reverse,
+        ]);
+        let mut m = app(Effect::Marquee);
+        assert_eq!(row_targets(&m), vec![Target::Color(1), Target::AddColor, Target::SpeedSlider, Target::BrightnessSlider, Target::Reverse]);
+        m.toggle_sync();
+        assert_eq!(row_targets(&m), vec![Target::Color(1), Target::Speed(Speed::Slow), Target::Speed(Speed::Medium), Target::Speed(Speed::Fast)],
+            "on the RAM: the old row");
+        assert_eq!(row_targets(&app(Effect::Static)), vec![Target::Color(1), Target::BrightnessSlider]);
+        assert_eq!(row_targets(&app(Effect::Rainbow)), vec![Target::SpeedSlider, Target::BrightnessSlider, Target::Reverse]);
+        let mut m = app(Effect::ColorShift);
+        m.toggle_random();
+        assert_eq!(row_targets(&m), vec![Target::Random, Target::SpeedSlider, Target::BrightnessSlider, Target::Reverse],
+            "random hides the colours");
+    }
+
+    #[test]
+    fn option_rows_sit_one_under_the_other() {
+        let l = layout(&app(Effect::ColorWave), &measure);
+        let label = l.settings_label.unwrap();
+        let (color, speed, bright) = (button(&l, Target::Color(1)), button(&l, Target::SpeedSlider), button(&l, Target::BrightnessSlider));
+        assert_eq!(color.y, label.y + label.h + 8.0);
+        assert_eq!(speed.y, color.y + PILL_H + 8.0);
+        assert_eq!((speed.h, bright.h, speed.w, bright.w), (44.0, 44.0, 140.0, 140.0), "44 px tall, 140 px tracks");
+        let add = button(&l, Target::AddColor);
+        assert_eq!((add.w, add.h), (44.0, 44.0));
+        let random = button(&l, Target::Random);
+        assert_eq!(random.x, button(&l, Target::RemoveColor).right() + 4.0 + 12.0);
+        let [s, b] = l.sliders[..] else { panic!("two sliders") };
+        assert_eq!((s.slider, b.slider), (Slider::Speed, Slider::Brightness));
+        assert_eq!((s.label.x, s.label.right() + 10.0, speed.right() + 10.0), (SIDE, speed.x, s.value.x));
+        assert_eq!(b.label.x, s.value.right() + 24.0);
+        // Wide text shortens the tracks rather than run past the edge.
+        let l = layout(&app(Effect::ColorWave), &wide);
+        assert!(button(&l, Target::SpeedSlider).w < 140.0);
+    }
+
+    #[test]
+    fn slider_positions_map_to_values() {
+        let track = Rect { x: 100.0, y: 0.0, w: 200.0, h: 44.0 };
+        assert_eq!(slider_value_at(track, 100.0, (25, 300)), 25.0);
+        assert_eq!(slider_value_at(track, 300.0, (25, 300)), 300.0);
+        assert_eq!(slider_value_at(track, 0.0, (10, 100)), 10.0, "clamped on the left");
+        assert_eq!(slider_value_at(track, 999.0, (10, 100)), 100.0, "and on the right");
+        assert_eq!(slider_value_at(track, 200.0, (10, 100)), 55.0);
+        assert_eq!(slider_fraction(55, (10, 100)), 0.5);
+        assert_eq!(slider_fraction(300, (25, 300)), 1.0);
+        assert_eq!(slider_fraction(5, (10, 100)), 0.0);
+        assert_eq!(Target::SpeedSlider.slider(), Some(Slider::Speed));
+        assert_eq!(Target::BrightnessSlider.slider(), Some(Slider::Brightness));
+        assert_eq!(Target::Apply.slider(), None);
     }
 
     #[test]

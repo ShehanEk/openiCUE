@@ -163,8 +163,9 @@ pub fn apply_builtin(bus: &mut dyn Bus, stick: &StickInfo, settings: &Settings) 
     apply_builtin_all(bus, std::slice::from_ref(stick), settings).remove(0)
 }
 
+/// Static's colour, dimmed by the brightness setting. At 100 % it is `color1` as is.
 fn static_colors(settings: &Settings) -> [u8; LED_COUNT * 4] {
-    let Rgb(r, g, b) = settings.color1;
+    let Rgb(r, g, b) = settings.color1.dimmed(settings.brightness);
     let mut colors = [0u8; LED_COUNT * 4];
     for led in colors.as_chunks_mut::<4>().0 {
         *led = [r, g, b, 255];
@@ -516,6 +517,7 @@ mod tests {
             let settings = Settings {
                 effect, random, direction, speed: Speed::Fast,
                 color1: Rgb(1, 2, 3), color2: Rgb(4, 5, 6), synced: false,
+                ..Settings::default()
             };
             apply_builtin(&mut bus, &stick(4), &settings).unwrap();
             assert_eq!(writes(&bus), buffer_writes(&packet(head), 1), "{effect:?} random={random}");
@@ -550,6 +552,37 @@ mod tests {
         assert_eq!(colors.len(), 40);
         expected.extend(buffer_writes(&colors, 2));
         assert_eq!(writes(&bus), expected);
+    }
+
+    /// Brightness dims only Static's colour bytes; its effect packet is unchanged.
+    #[test]
+    fn static_at_half_brightness_halves_only_the_colors() {
+        let mut bus = FakeBus::default();
+        let settings = Settings {
+            effect: Effect::Static, color1: Rgb(200, 100, 51), brightness: 50, ..Settings::default()
+        };
+        apply_builtin(&mut bus, &stick(4), &settings).unwrap();
+        let mut expected = buffer_writes(&packet([0x10, 0, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0]), 1);
+        expected.extend(buffer_writes(&[100u8, 50, 26, 0xFF].repeat(10), 2));
+        assert_eq!(writes(&bus), expected);
+    }
+
+    /// The extra settings never reach the RAM's own effects.
+    #[test]
+    fn extra_settings_leave_built_in_packets_alone() {
+        for effect in [Effect::ColorShift, Effect::ColorWave, Effect::Marquee, Effect::Rainbow] {
+            let packet_for = |settings: Settings| {
+                let mut bus = FakeBus::default();
+                apply_builtin(&mut bus, &stick(4), &settings).unwrap();
+                writes(&bus)
+            };
+            let plain = Settings { effect, ..Settings::default() };
+            let extra = Settings {
+                more_colors: [Rgb(1, 2, 3), Rgb(4, 5, 6)], color_count: 4, speed_pct: 300,
+                brightness: 10, reverse: true, ..plain
+            };
+            assert_eq!(packet_for(extra), packet_for(plain), "{effect:?}");
+        }
     }
 
     /// Direct block: count 10, RGB per LED in order (Vengeance RGB Pro: `reverse` false),

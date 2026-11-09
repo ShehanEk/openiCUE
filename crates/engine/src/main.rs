@@ -56,8 +56,9 @@ fn run(restore: bool) -> i32 {
     // The sticks keep built-in effects through restarts and power-off
     // (hardware stage 5), and every rewrite saves to their own memory,
     // so a logon restore only has work to do for effects drawn in software:
-    // custom effects and built-ins kept in sync.
-    if restore && !system::load_settings().runs_in_software() {
+    // custom effects and built-ins kept in sync. With nothing saved, the
+    // defaults (a synced effect) were never applied, so there's nothing to restore.
+    if restore && !system::load_saved_settings().is_some_and(|s| s.runs_in_software()) {
         return 0;
     }
     let Ok(mut bus) = PawnIoBus::open() else { return 5 };

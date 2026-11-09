@@ -283,11 +283,13 @@ fn read_limited(reader: impl Read) -> Option<String> {
 
 /// Any problem gives the default settings, and nothing from a bad file is used.
 pub fn load_settings() -> Settings {
-    let read = || -> Option<Settings> {
-        let path = secure_data_dir().ok()?.join("settings.txt");
-        config::parse(&read_limited(std::fs::File::open(path).ok()?)?)
-    };
-    read().unwrap_or_default()
+    load_saved_settings().unwrap_or_default()
+}
+
+/// The saved settings, or `None` if there are none or they can't be used.
+pub fn load_saved_settings() -> Option<Settings> {
+    let path = secure_data_dir().ok()?.join("settings.txt");
+    config::parse(&read_limited(std::fs::File::open(path).ok()?)?)
 }
 
 pub fn save_settings(settings: &Settings) -> Result<(), u32> {

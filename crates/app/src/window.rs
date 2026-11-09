@@ -2,7 +2,7 @@
 use crate::actions::{self, Startup};
 use crate::paint::Painter;
 use openicue::layout::{self, Layout, Target};
-use openicue::model::{Model, Screen};
+use openicue::model::{Model, Screen, Slider};
 use openicue_core::costs::Cost;
 use openicue_core::effects::Rgb;
 use openicue_core::order::StickOrder;
@@ -16,7 +16,7 @@ use openicue_gdi::wide;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::Dialogs::{ChooseColorW, CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW};
 use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{VK_ESCAPE, VK_RETURN};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const TIMER_PREVIEW: usize = 1;
@@ -37,6 +37,10 @@ pub struct App {
     pub last_sample: Option<control::Sample>,
     /// The engine claim and sticks while the stick-order picker is open.
     pub arranging: Option<actions::Arranging>,
+    /// The slider being dragged, while the mouse is captured.
+    pub dragging: Option<Slider>,
+    /// The last slider touched, which the Left and Right arrow keys adjust.
+    pub last_slider: Option<Slider>,
 }
 
 impl App {
@@ -311,7 +315,7 @@ fn click(hwnd: HWND, target: Target) {
             }
         }
         Target::Color(n) => {
-            let Some(current) = app(hwnd).map(|a| if n == 1 { a.model.settings.color1 } else { a.model.settings.color2 }) else { return };
+            let Some(current) = app(hwnd).and_then(|a| a.model.color(n)) else { return };
             // The dialog runs its own message loop, so no App borrow is held here.
             if let Some(color) = pick_color(hwnd, current) {
                 if let Some(a) = app(hwnd) {
@@ -335,12 +339,35 @@ fn click(hwnd: HWND, target: Target) {
                 Target::Direction(d) => a.model.set_direction(d),
                 Target::Random => a.model.toggle_random(),
                 Target::Sync => a.model.toggle_sync(),
+                Target::AddColor => a.model.add_color(),
+                Target::RemoveColor => a.model.remove_color(),
+                Target::Reverse => a.model.toggle_reverse(),
                 Target::Settings => a.model.open_settings(),
                 _ => {}
             }
         }
     }
     invalidate(hwnd);
+}
+
+/// Sets `slider` from the pointer's `x`, on its track in the last layout.
+fn drag_slider(hwnd: HWND, slider: Slider, x: f32) {
+    let Some(a) = app(hwnd) else { return };
+    let target = match slider {
+        Slider::Speed => Target::SpeedSlider,
+        Slider::Brightness => Target::BrightnessSlider,
+    };
+    let Some(track) = a.layout.as_ref().and_then(|l| l.buttons.iter().find(|b| b.target == target)).map(|b| b.rect) else { return };
+    a.model.set_slider(slider, layout::slider_value_at(track, x, slider.range()));
+    invalidate(hwnd);
+}
+
+/// The slider the arrow keys move: the last one touched, if it's on screen.
+fn arrow_slider(hwnd: HWND) -> Option<Slider> {
+    let a = app(hwnd)?;
+    let slider = a.last_slider?;
+    let shown = a.layout.as_ref()?.buttons.iter().any(|b| b.target.slider() == Some(slider));
+    (a.model.screen == Screen::App && shown).then_some(slider)
 }
 
 fn logical(hwnd: HWND, lparam: LPARAM) -> (f32, f32) {
@@ -396,7 +423,40 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             }
             0
         }
+        WM_LBUTTONDOWN => {
+            // A slider follows the pointer from the press until the release.
+            let (x, y) = logical(hwnd, lparam);
+            let slider = app(hwnd).and_then(|a| a.layout.as_ref().and_then(|l| layout::hit(l, x, y))).and_then(Target::slider);
+            if let Some(slider) = slider {
+                if let Some(a) = app(hwnd) {
+                    a.dragging = Some(slider);
+                    a.last_slider = Some(slider);
+                }
+                SetCapture(hwnd);
+                drag_slider(hwnd, slider, x);
+                return 0;
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_MOUSEMOVE => {
+            if let Some(slider) = app(hwnd).and_then(|a| a.dragging) {
+                drag_slider(hwnd, slider, logical(hwnd, lparam).0);
+                return 0;
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_CAPTURECHANGED => {
+            if let Some(a) = app(hwnd) {
+                a.dragging = None;
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         WM_LBUTTONUP => {
+            if app(hwnd).is_some_and(|a| a.dragging.is_some()) {
+                // Clears `dragging` through WM_CAPTURECHANGED; a drag is never a click.
+                ReleaseCapture();
+                return 0;
+            }
             let (x, y) = logical(hwnd, lparam);
             let target = app(hwnd).and_then(|a| a.layout.as_ref().and_then(|l| layout::hit(l, x, y)));
             if let Some(target) = target {
@@ -416,6 +476,14 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
                 && app(hwnd).is_some_and(|a| a.model.screen == Screen::App)
             {
                 click(hwnd, Target::Apply);
+            } else if wparam == VK_LEFT as usize || wparam == VK_RIGHT as usize {
+                if let Some(slider) = arrow_slider(hwnd) {
+                    let step = if wparam == VK_LEFT as usize { -1 } else { 1 };
+                    if let Some(a) = app(hwnd) {
+                        a.model.nudge(slider, step);
+                    }
+                    invalidate(hwnd);
+                }
             }
             0
         }
@@ -487,6 +555,8 @@ pub fn run() -> i32 {
             scale: 1.0,
             last_sample: None,
             arranging: None,
+            dragging: None,
+            last_slider: None,
         });
         let raw = Box::into_raw(app);
         (*raw).check();

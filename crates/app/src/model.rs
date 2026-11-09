@@ -1,6 +1,6 @@
 //! What the window shows. Pure logic, no Windows calls.
 use openicue_core::costs::{Cost, Costs};
-use openicue_core::effects::{Direction, Effect, Rgb, Settings, Speed, ALL_EFFECTS};
+use openicue_core::effects::{Direction, Effect, Rgb, Settings, Speed, ALL_EFFECTS, BRIGHTNESS_RANGE, SPEED_PCT_RANGE};
 use openicue_core::order::StickOrder;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,6 +81,39 @@ pub fn builtins() -> Vec<Effect> {
 
 pub fn customs() -> Vec<Effect> {
     ALL_EFFECTS.into_iter().filter(|e| e.is_custom()).collect()
+}
+
+/// The speed and brightness sliders.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Slider {
+    Speed,
+    Brightness,
+}
+
+/// Both sliders move in steps of 5 percent.
+pub const SLIDER_STEP: u16 = 5;
+
+impl Slider {
+    pub fn range(self) -> (u16, u16) {
+        match self {
+            Slider::Speed => SPEED_PCT_RANGE,
+            Slider::Brightness => (BRIGHTNESS_RANGE.0.into(), BRIGHTNESS_RANGE.1.into()),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Slider::Speed => "Speed",
+            Slider::Brightness => "Brightness",
+        }
+    }
+}
+
+/// Rounds to the nearest step, then keeps it in range.
+fn snap(value: f32, min: u16, max: u16) -> u16 {
+    let step = f32::from(SLIDER_STEP);
+    let value = if value.is_finite() { (value / step).round() * step } else { f32::from(min) };
+    value.clamp(f32::from(min), f32::from(max)) as u16
 }
 
 fn format_cost(cost: Cost) -> String {
@@ -221,8 +254,14 @@ impl Model {
             .collect()
     }
 
+    /// Picking another effect starts it in sync where it can be (2026-11-09),
+    /// with its own number of colours. Picking the same one again keeps both.
     pub fn select(&mut self, effect: Effect) {
-        self.settings.effect = effect;
+        if effect != self.settings.effect {
+            self.settings.effect = effect;
+            self.settings.synced = effect.allows_sync();
+            self.settings.color_count = effect.color_count();
+        }
         self.settings = self.settings.normalized();
         self.message.clear();
     }
@@ -249,13 +288,118 @@ impl Model {
         }
     }
 
-    /// `index` is 1 or 2. Anything else is ignored.
+    /// `index` is 1 to 4. Anything else is ignored.
     pub fn set_color(&mut self, index: u8, color: Rgb) {
         match index {
             1 => self.settings.color1 = color,
             2 => self.settings.color2 = color,
+            3 => self.settings.more_colors[0] = color,
+            4 => self.settings.more_colors[1] = color,
             _ => {}
         }
+    }
+
+    /// Colour `index`, from 1 to 4.
+    pub fn color(&self, index: u8) -> Option<Rgb> {
+        let i = usize::from(index).checked_sub(1)?;
+        self.settings.colors().get(i).copied()
+    }
+
+    /// Software-drawn effects, and Static, get the extra settings: more
+    /// colours, a speed slider, brightness and Reverse. The RAM's own
+    /// animations keep only the RAM's options.
+    pub fn soft_opts(&self) -> bool {
+        self.settings.runs_in_software() || self.settings.effect == Effect::Static
+    }
+
+    /// The fewest and most colours the user can pick: Static 1, effects with colours 1 to 4.
+    pub fn color_limits(&self) -> (u8, u8) {
+        self.settings.effect.color_limits()
+    }
+
+    /// The colour swatches and + and −, hidden while Random is on.
+    pub fn show_soft_colors(&self) -> bool {
+        self.color_limits().1 > 0 && !self.settings.random
+    }
+
+    pub fn can_add_color(&self) -> bool {
+        self.show_soft_colors() && self.settings.color_count < self.color_limits().1
+    }
+
+    pub fn can_remove_color(&self) -> bool {
+        self.show_soft_colors() && self.settings.color_count > self.color_limits().0.max(1)
+    }
+
+    pub fn add_color(&mut self) {
+        if self.can_add_color() {
+            self.settings.color_count += 1;
+        }
+    }
+
+    /// Drops the last colour. Its value is kept for when it's added back.
+    pub fn remove_color(&mut self) {
+        if self.can_remove_color() {
+            self.settings.color_count -= 1;
+        }
+    }
+
+    pub fn show_speed_slider(&self) -> bool {
+        self.settings.effect.has_speed()
+    }
+
+    pub fn set_speed_pct(&mut self, pct: f32) {
+        self.settings.speed_pct = snap(pct, SPEED_PCT_RANGE.0, SPEED_PCT_RANGE.1);
+    }
+
+    pub fn set_brightness(&mut self, pct: f32) {
+        let (low, high) = BRIGHTNESS_RANGE;
+        self.settings.brightness = snap(pct, low.into(), high.into()) as u8;
+    }
+
+    /// Reverse, for software effects that move but have no direction choice.
+    pub fn show_reverse(&self) -> bool {
+        self.settings.runs_in_software() && self.settings.effect.has_speed() && self.directions().is_empty()
+    }
+
+    pub fn toggle_reverse(&mut self) {
+        if self.show_reverse() {
+            self.settings.reverse = !self.settings.reverse;
+        }
+    }
+
+    /// The direction group, among the software options.
+    pub fn show_soft_direction(&self) -> bool {
+        self.settings.runs_in_software() && !self.directions().is_empty()
+    }
+
+    /// "1.25×": the speed as a multiple, with at most one trailing zero dropped.
+    pub fn speed_text(&self) -> String {
+        let text = format!("{:.2}", f32::from(self.settings.speed_pct) / 100.0);
+        format!("{}×", text.strip_suffix('0').unwrap_or(&text))
+    }
+
+    pub fn brightness_text(&self) -> String {
+        format!("{}%", self.settings.brightness)
+    }
+
+    pub fn slider_value(&self, slider: Slider) -> u16 {
+        match slider {
+            Slider::Speed => self.settings.speed_pct,
+            Slider::Brightness => self.settings.brightness.into(),
+        }
+    }
+
+    pub fn set_slider(&mut self, slider: Slider, value: f32) {
+        match slider {
+            Slider::Speed => self.set_speed_pct(value),
+            Slider::Brightness => self.set_brightness(value),
+        }
+    }
+
+    /// One step left (`-1`) or right (`1`), for the arrow keys.
+    pub fn nudge(&mut self, slider: Slider, steps: i32) {
+        let value = f32::from(self.slider_value(slider)) + (steps * i32::from(SLIDER_STEP)) as f32;
+        self.set_slider(slider, value);
     }
 
     pub fn show_colors(&self) -> bool {
@@ -309,9 +453,11 @@ impl Model {
         let effect = self.settings.effect;
         if !self.settings.runs_in_software() {
             if self.running.is_some() {
-                "After you close this window. Applying stops the background process."
+                "The RAM runs this itself. Applying stops the background process."
+            } else if effect == Effect::Static {
+                "The RAM runs this itself, so nothing keeps running."
             } else {
-                "After you close this window. The RAM runs this itself."
+                "The RAM runs this itself, but the sticks drift out of sync."
             }
         } else if self.is_running_selected() {
             "Using this now, until you stop it or shut down."
@@ -413,11 +559,18 @@ mod tests {
     #[test]
     fn built_in_cost_is_zero_and_says_why() {
         let mut m = model(Effect::RainbowWave);
+        m.toggle_sync();
         assert_eq!(m.cost_line(), "0 MB · 0% CPU");
         assert!(!m.cost_is_ongoing());
-        assert_eq!(m.cost_body(), "After you close this window. The RAM runs this itself.");
+        assert_eq!(m.cost_body(), "The RAM runs this itself, but the sticks drift out of sync.");
         m.running = Some(Effect::Chase);
-        assert_eq!(m.cost_body(), "After you close this window. Applying stops the background process.");
+        assert_eq!(m.cost_body(), "The RAM runs this itself. Applying stops the background process.");
+
+        let mut m = model(Effect::Static);
+        assert_eq!(m.cost_line(), "0 MB · 0% CPU");
+        assert_eq!(m.cost_body(), "The RAM runs this itself, so nothing keeps running.");
+        m.running = Some(Effect::Chase);
+        assert_eq!(m.cost_body(), "The RAM runs this itself. Applying stops the background process.");
     }
 
     #[test]
@@ -449,22 +602,161 @@ mod tests {
         for (effect, shown) in [(Effect::ColorWave, true), (Effect::Static, false), (Effect::Breathing, false)] {
             let mut m = model(effect);
             assert_eq!(m.show_sync(), shown, "{effect:?}");
+            assert_eq!(m.settings.synced, shown, "{effect:?} starts in sync where it can");
             m.toggle_sync();
-            assert_eq!(m.settings.synced, shown, "{effect:?}");
+            assert!(!m.settings.synced, "{effect:?}");
         }
         let mut m = model(Effect::ColorWave);
         m.toggle_sync();
         m.toggle_sync();
-        assert!(!m.settings.synced);
-        m.toggle_sync();
+        assert!(m.settings.synced);
         m.select(Effect::Static);
         assert!(!m.settings.synced, "select drops sync where it isn't allowed");
     }
 
     #[test]
-    fn synced_built_in_costs_like_a_custom_effect() {
+    fn select_turns_sync_on_and_keeps_an_untick_on_the_same_tile() {
         let mut m = model(Effect::ColorWave);
         m.toggle_sync();
+        m.select(Effect::ColorWave);
+        assert!(!m.settings.synced, "the same tile keeps the user's choice");
+        m.select(Effect::Rain);
+        assert!(m.settings.synced, "another effect starts in sync");
+        for effect in openicue_core::effects::ALL_EFFECTS {
+            assert_eq!(model(effect).settings.synced, effect.allows_sync(), "{effect:?}");
+        }
+        // Saved settings keep the user's choice.
+        let saved = Settings { effect: Effect::Visor, synced: false, ..Settings::default() };
+        assert!(!Model::new(saved).settings.synced);
+    }
+
+    #[test]
+    fn extra_options_show_for_software_effects_and_static() {
+        for effect in openicue_core::effects::ALL_EFFECTS {
+            let mut m = model(effect);
+            assert!(m.soft_opts(), "{effect:?} is in sync or Static");
+            if effect.allows_sync() {
+                m.toggle_sync();
+                assert!(!m.soft_opts(), "{effect:?} on the RAM keeps the RAM's options");
+            }
+        }
+        let m = model(Effect::Static);
+        assert!(m.show_soft_colors() && !m.can_add_color() && !m.can_remove_color());
+        assert!(!m.show_speed_slider() && !m.show_reverse() && !m.show_soft_direction());
+    }
+
+    #[test]
+    fn colours_add_and_remove_within_the_limits() {
+        let mut m = model(Effect::ColorWave);
+        assert_eq!((m.settings.color_count, m.color_limits()), (2, (1, 4)));
+        m.add_color();
+        m.add_color();
+        assert_eq!(m.settings.color_count, 4);
+        assert!(!m.can_add_color());
+        m.add_color();
+        assert_eq!(m.settings.color_count, 4, "4 at most");
+        for _ in 0..5 {
+            m.remove_color();
+        }
+        assert_eq!(m.settings.color_count, 1, "1 at least");
+        assert!(!m.can_remove_color() && m.can_add_color());
+
+        let mut m = model(Effect::Marquee);
+        assert_eq!(m.settings.color_count, 1, "a one-colour effect starts with one");
+        m.add_color();
+        assert_eq!(m.settings.color_count, 2);
+        m.select(Effect::Chase);
+        assert_eq!(m.settings.color_count, 2, "each effect starts with its own count");
+
+        let mut m = model(Effect::Rainbow);
+        assert_eq!((m.settings.color_count, m.color_limits()), (0, (0, 0)));
+        assert!(!m.show_soft_colors());
+        m.add_color();
+        assert_eq!(m.settings.color_count, 0);
+
+        let mut m = model(Effect::ColorShift);
+        m.toggle_random();
+        assert!(!m.show_soft_colors() && !m.can_add_color() && !m.can_remove_color(), "random hides them");
+        m.add_color();
+        assert_eq!(m.settings.color_count, 2);
+    }
+
+    #[test]
+    fn colours_three_and_four_are_kept_and_set() {
+        let mut m = model(Effect::Gradient);
+        assert_eq!(m.color(3), Some(Rgb(0x7C, 0xFF, 0xB2)));
+        assert_eq!(m.color(4), Some(Rgb(0xC7, 0x7D, 0xFF)));
+        m.set_color(3, Rgb(1, 2, 3));
+        m.set_color(4, Rgb(4, 5, 6));
+        assert_eq!(m.settings.more_colors, [Rgb(1, 2, 3), Rgb(4, 5, 6)]);
+        assert_eq!((m.color(0), m.color(5)), (None, None));
+        m.set_color(5, Rgb(9, 9, 9));
+        assert_eq!(m.settings.colors()[..2], [Settings::default().color1, Settings::default().color2]);
+    }
+
+    #[test]
+    fn sliders_snap_to_steps_and_stay_in_range() {
+        let mut m = model(Effect::Chase);
+        m.set_speed_pct(127.4);
+        assert_eq!(m.settings.speed_pct, 125);
+        m.set_speed_pct(1.0);
+        assert_eq!(m.settings.speed_pct, 25);
+        m.set_speed_pct(9_999.0);
+        assert_eq!(m.settings.speed_pct, 300);
+        m.set_speed_pct(f32::NAN);
+        assert_eq!(m.settings.speed_pct, 25);
+        m.set_brightness(82.6);
+        assert_eq!(m.settings.brightness, 85);
+        m.set_brightness(0.0);
+        assert_eq!(m.settings.brightness, 10);
+        m.set_brightness(400.0);
+        assert_eq!(m.settings.brightness, 100);
+
+        m.nudge(Slider::Brightness, -1);
+        assert_eq!(m.slider_value(Slider::Brightness), 95);
+        m.set_speed_pct(300.0);
+        m.nudge(Slider::Speed, 1);
+        assert_eq!(m.slider_value(Slider::Speed), 300, "already at the top");
+        m.nudge(Slider::Speed, -1);
+        assert_eq!(m.slider_value(Slider::Speed), 295);
+        m.set_slider(Slider::Speed, 100.0);
+        assert_eq!(m.settings.speed_pct, 100);
+        assert_eq!((Slider::Speed.range(), Slider::Brightness.range()), ((25, 300), (10, 100)));
+        assert_eq!((Slider::Speed.label(), Slider::Brightness.label()), ("Speed", "Brightness"));
+    }
+
+    #[test]
+    fn slider_values_read_like_the_design() {
+        let mut m = model(Effect::Chase);
+        for (pct, text) in [(100, "1.0×"), (125, "1.25×"), (150, "1.5×"), (25, "0.25×"), (300, "3.0×"), (205, "2.05×")] {
+            m.set_speed_pct(pct as f32);
+            assert_eq!(m.speed_text(), text);
+        }
+        m.set_brightness(80.0);
+        assert_eq!(m.brightness_text(), "80%");
+    }
+
+    #[test]
+    fn reverse_and_direction_follow_the_effect() {
+        let mut m = model(Effect::Chase);
+        assert!(m.show_reverse() && !m.show_soft_direction());
+        m.toggle_reverse();
+        assert!(m.settings.reverse);
+        let mut m = model(Effect::ColorShift);
+        assert!(m.show_reverse(), "a synced built-in that moves");
+        m.toggle_sync();
+        assert!(!m.show_reverse());
+        m.toggle_reverse();
+        assert!(!m.settings.reverse, "ignored where it isn't shown");
+        let m = model(Effect::Rain);
+        assert!(!m.show_reverse() && m.show_soft_direction());
+        let m = model(Effect::Static);
+        assert!(!m.show_reverse());
+    }
+
+    #[test]
+    fn synced_built_in_costs_like_a_custom_effect() {
+        let mut m = model(Effect::ColorWave);
         assert!(m.cost_is_ongoing());
         assert_eq!(m.cost_line(), "Not measured yet");
         assert_eq!(m.cost_body(), "Keeps running after you close this window. Apply it to see the real cost.");
@@ -479,7 +771,7 @@ mod tests {
         m.toggle_sync();
         assert!(!m.cost_is_ongoing());
         assert_eq!(m.cost_line(), "0 MB · 0% CPU");
-        assert_eq!(m.cost_body(), "After you close this window. Applying stops the background process.");
+        assert_eq!(m.cost_body(), "The RAM runs this itself. Applying stops the background process.");
         assert_eq!(m.apply_label(), "Apply");
     }
 

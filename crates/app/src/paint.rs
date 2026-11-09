@@ -1,6 +1,6 @@
 //! Draws the window with GDI+ into an off-screen bitmap, then copies it in one go.
 use openicue::layout::{self, Font, Layout, Rect, Target};
-use openicue::model::{self, Model, Screen};
+use openicue::model::{self, Model, Screen, Slider};
 use openicue::preview;
 use openicue_core::effects::Rgb;
 use openicue_gdi::{Align, Canvas, FontSpec, Graphics};
@@ -141,11 +141,16 @@ impl Painter {
                 }
             }
         }
-        if let Some(r) = l.builtin_label {
-            self.text(g, "On the RAM", Font::Label, r, MUTED, Align::Near);
+        if let Some(r) = l.effects_label {
+            self.text(g, "Effects", Font::Label, r, MUTED, Align::Near);
         }
-        if let Some(r) = l.custom_label {
-            self.text(g, "In the background", Font::Label, r, ORANGE, Align::Near);
+        for s in &l.sliders {
+            let value = match s.slider {
+                Slider::Speed => model.speed_text(),
+                Slider::Brightness => model.brightness_text(),
+            };
+            self.text(g, s.slider.label(), Font::Small, s.label, PILL_TEXT, Align::Near);
+            self.text(g, &value, Font::Small, s.value, MUTED, Align::Near);
         }
         if let Some(r) = l.divider {
             c.rounded(g, r, 0.0, DIVIDER);
@@ -276,8 +281,31 @@ impl Painter {
                 }
                 self.text(g, model::display_name(e), Font::Body, text, if on { BG } else { PILL_TEXT }, Align::Center);
             }
+            Target::AddColor | Target::RemoveColor => {
+                // A 32 px round button inside the 44 px hit area, with a 10 px icon.
+                let button = Rect { x: r.x + 6.0, y: r.y + 6.0, w: 32.0, h: 32.0 };
+                c.rounded(g, button, 16.0, PILL);
+                let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+                c.line(g, PILL_TEXT, 1.4, &[(cx - 4.0, cy), (cx + 4.0, cy)]);
+                if target == Target::AddColor {
+                    c.line(g, PILL_TEXT, 1.4, &[(cx, cy - 4.0), (cx, cy + 4.0)]);
+                }
+            }
+            Target::SpeedSlider | Target::BrightnessSlider => {
+                let Some(slider) = target.slider() else { return };
+                let k = layout::slider_fraction(model.slider_value(slider), slider.range());
+                // A 4 px track, filled up to a 14 px thumb.
+                let cy = r.y + r.h / 2.0;
+                c.rounded(g, Rect { x: r.x, y: cy - 2.0, w: r.w, h: 4.0 }, 2.0, SWATCH_EDGE);
+                if k > 0.0 {
+                    c.rounded(g, Rect { x: r.x, y: cy - 2.0, w: r.w * k, h: 4.0 }, 2.0, FG);
+                }
+                let thumb_x = r.x + r.w * k;
+                c.rounded(g, Rect { x: thumb_x - 7.0, y: cy - 7.0, w: 14.0, h: 14.0 }, 7.0, FG);
+            }
+            Target::Reverse => self.checkbox(g, r, "Reverse", s.reverse),
             Target::Color(n) => {
-                let color = if n == 1 { s.color1 } else { s.color2 };
+                let color = model.color(n).unwrap_or(s.color1);
                 let swatch = Rect { x: r.x + 8.0, y: r.y + 8.0, w: 28.0, h: 28.0 };
                 c.rounded(g, swatch, 6.0, SWATCH_EDGE);
                 let inner = Rect { x: swatch.x + 1.0, y: swatch.y + 1.0, w: 26.0, h: 26.0 };
