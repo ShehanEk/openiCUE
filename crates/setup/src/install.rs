@@ -1,5 +1,6 @@
 //! The work Setup does. Runs on a worker thread; reports through `report`.
 use openicue_core::pawnio::PawnIoBus;
+use openicue_core::win::wide;
 use openicue_core::{control, ram, system};
 use openicue_setup::model::Failure;
 use openicue_setup::payload;
@@ -30,10 +31,6 @@ const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
 fn other(text: &str) -> Failure {
     Failure::Other(text.to_string())
-}
-
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 fn install_dir() -> Result<PathBuf, Failure> {
@@ -266,6 +263,8 @@ fn install(report: &impl Fn(Event)) -> Result<(), Failure> {
     write_checked(&dir.join("LICENSE-PawnIO.txt"), payload::LICENSE_PAWNIO)?;
     write_checked(&dir.join("PawnIO-SOURCE.txt"), payload::PAWNIO_SOURCE)?;
     write_checked(&dir.join("LICENSE-PawnIO-Modules.txt"), payload::LICENSE_MODULES)?;
+    // Now, not last, so a later failure still leaves an Installed-apps entry to remove it.
+    set_uninstall_entry(&dir)?;
 
     // Step 2: PawnIO, unless it's already installed.
     report(Event::Step(2));
@@ -276,7 +275,7 @@ fn install(report: &impl Fn(Event)) -> Result<(), Failure> {
         }
     }
 
-    // Step 3: settings folder, logon task, Start menu entry, uninstall entry.
+    // Step 3: settings folder, logon task, Start menu entry.
     report(Event::Step(3));
     reset_data_dir()?;
     write_task(&dir)?;
@@ -284,16 +283,29 @@ fn install(report: &impl Fn(Event)) -> Result<(), Failure> {
         .map_err(|_| other("Setup couldn't find the Start menu."))?;
     crate::shortcut::create(&programs.join("openiCUE.lnk"), &dir.join("openicue.exe"))
         .map_err(|_| other("Setup couldn't add openiCUE to the Start menu."))?;
-    set_uninstall_entry(&dir)?;
     Ok(())
 }
 
 /// "Open openiCUE": starts the installed window by full path, with no
 /// arguments, in its own folder.
 pub fn open_app() -> Result<(), Failure> {
-    let fail = || other("Setup couldn't start openiCUE.");
-    let dir = install_dir()?;
-    let exe = dir.join("openicue.exe");
+    launch("openicue.exe", "").map_err(|()| other("Setup couldn't start openiCUE."))
+}
+
+/// After a successful install only: starts the installed engine with
+/// `--restore` to put the saved effect back. It exits by itself for
+/// built-in effects and keeps running for ones drawn in software. A failure
+/// is ignored, since the logon task restores the effect anyway.
+pub fn start_restore() {
+    let _ = launch("openicue-engine.exe", " --restore");
+}
+
+/// Starts `name` from the install folder by full path, in that folder, with
+/// `args` (empty or starting with a space) after the quoted path. No
+/// handles are inherited and the process isn't waited on.
+fn launch(name: &str, args: &str) -> Result<(), ()> {
+    let dir = install_dir().map_err(|_| ())?;
+    let exe = dir.join(name);
     let to_wide = |p: &Path| -> Vec<u16> { p.as_os_str().encode_wide().chain(std::iter::once(0)).collect() };
     let application = to_wide(&exe);
     let folder = to_wide(&dir);
@@ -301,6 +313,7 @@ pub fn open_app() -> Result<(), Failure> {
     command.push(u16::from(b'"'));
     command.extend(exe.as_os_str().encode_wide());
     command.push(u16::from(b'"'));
+    command.extend(args.encode_utf16());
     command.push(0);
     // SAFETY: zeroed is a valid starting value for both plain C structs.
     let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
@@ -314,7 +327,7 @@ pub fn open_app() -> Result<(), Failure> {
             null(), folder.as_ptr(), &startup, &mut info)
     };
     if ok == 0 {
-        return Err(fail());
+        return Err(());
     }
     // SAFETY: both handles came from the successful call and are closed once.
     unsafe {
@@ -342,10 +355,7 @@ impl Picker {
     pub fn begin() -> Option<Picker> {
         let mut bus = PawnIoBus::open().ok()?;
         let claim = system::claim_engine().ok()??;
-        let sticks: Vec<ram::StickInfo> = ram::detect(&mut bus)
-            .into_iter()
-            .filter_map(|addr| ram::read_info(&mut bus, addr).ok())
-            .collect();
+        let sticks = ram::sticks(&mut bus);
         if sticks.len() < 2 || system::load_order().is_some_and(|order| order.fits(sticks.len())) {
             return None;
         }
@@ -367,8 +377,8 @@ impl Picker {
 
 impl Drop for Picker {
     /// Sets every stick black while the claim is still held; the fields,
-    /// claim and driver included, are released right after. Setup doesn't
-    /// re-apply an effect: the window or the logon task does that.
+    /// claim and driver included, are released right after. The window then
+    /// starts the engine's restore (start_restore) to put the effect back.
     fn drop(&mut self) {
         // No index matches `usize::MAX`, so every stick gets black.
         let _ = ram::light_only(&mut self.bus, &self.sticks, usize::MAX);

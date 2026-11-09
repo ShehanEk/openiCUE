@@ -454,7 +454,7 @@ mod tests {
         let m = app(Effect::Static);
         let narrow = layout(&m, &measure);
         let wide = layout(&m, &|t: &str, _: Font| t.chars().count() as f32 * 14.0);
-        let last = |l: &Layout| l.buttons.iter().filter(|b| matches!(b.target, Target::Effect(_))).last().unwrap().rect.y;
+        let last = |l: &Layout| l.buttons.iter().rfind(|b| matches!(b.target, Target::Effect(_))).unwrap().rect.y;
         assert!(last(&wide) > last(&narrow));
     }
 

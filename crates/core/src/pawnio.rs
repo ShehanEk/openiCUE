@@ -1,5 +1,6 @@
 //! Talks to the PawnIO driver and its signed SMBus module.
 use crate::bus::{Bus, BusError, StickAddr};
+use crate::win::wide;
 use std::ffi::c_void;
 use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0};
@@ -45,10 +46,6 @@ struct IoStatusBlock { status: usize, information: usize }
 extern "system" {
     fn NtOpenFile(handle: *mut HANDLE, access: u32, attributes: *const ObjectAttributes,
         io_status: *mut IoStatusBlock, share: u32, options: u32) -> i32;
-}
-
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 pub struct PawnIoBus {
@@ -110,8 +107,8 @@ impl PawnIoBus {
     fn call(&mut self, function: &str, input: &[u64], output: &mut [u64]) -> Result<(), BusError> {
         let mut buffer = vec![0u8; 32 + input.len() * 8];
         buffer[..function.len()].copy_from_slice(function.as_bytes());
-        for (slot, value) in buffer[32..].chunks_exact_mut(8).zip(input) {
-            slot.copy_from_slice(&value.to_le_bytes());
+        for (slot, value) in buffer[32..].as_chunks_mut::<8>().0.iter_mut().zip(input) {
+            *slot = value.to_le_bytes();
         }
         let mut returned = 0u32;
         let ok = unsafe {
@@ -197,8 +194,8 @@ fn block_cells(data: &[u8]) -> Result<[u64; 5], BusError> {
     bytes[0] = data.len() as u8;
     bytes[1..=data.len()].copy_from_slice(data);
     let mut cells = [0u64; 5];
-    for (cell, chunk) in cells.iter_mut().zip(bytes.chunks_exact(8)) {
-        *cell = u64::from_le_bytes(chunk.try_into().unwrap());
+    for (cell, chunk) in cells.iter_mut().zip(bytes.as_chunks::<8>().0) {
+        *cell = u64::from_le_bytes(*chunk);
     }
     Ok(cells)
 }

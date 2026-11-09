@@ -20,7 +20,7 @@ const STOP_POLL_MS: u64 = 50;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum StopError {
-    Event(u32),
+    Event,
     StillRunning,
 }
 
@@ -50,14 +50,9 @@ pub fn engine_path() -> Result<PathBuf, u32> {
     Ok(exe.parent().ok_or(0u32)?.join(ENGINE_EXE))
 }
 
-/// True while an engine holds its claim.
-pub fn engine_running() -> bool {
-    system::engine_claimed()
-}
-
 /// Asks a running engine to stop and waits until its claim is gone.
 pub fn stop_engine(timeout: Duration) -> Result<(), StopError> {
-    let event = system::open_stop_event().map_err(StopError::Event)?;
+    let event = system::open_stop_event().map_err(|_| StopError::Event)?;
     // A running engine holds the event. If we just created it, nothing is
     // running, and signaling would only stop the next engine at its start.
     if !event.already_existed() {
@@ -65,7 +60,7 @@ pub fn stop_engine(timeout: Duration) -> Result<(), StopError> {
     }
     event.signal();
     let deadline = Instant::now() + timeout;
-    while engine_running() {
+    while system::engine_claimed() {
         if Instant::now() >= deadline {
             return Err(StopError::StillRunning);
         }

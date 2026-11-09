@@ -102,7 +102,7 @@ fn sync(bus: &mut dyn Bus, chosen: Effect) {
         eprintln!("Another openiCUE process is using the RAM. Nothing written.");
         exit(1);
     };
-    let infos: Vec<ram::StickInfo> = ram::detect(bus).into_iter().filter_map(|a| ram::read_info(bus, a).ok()).collect();
+    let infos = ram::sticks(bus);
     let settings = Settings { effect: chosen, ..Settings::default() }.normalized();
     // Frame row `p` goes to the stick in slot `p`, as in the engine.
     let order = StickOrder::or_identity(system::load_order(), infos.len());

@@ -52,7 +52,7 @@ pub fn detect(bus: &mut dyn Bus) -> Vec<StickAddr> {
         .filter(|&addr| {
             let a = bus.read_byte(addr, REG_ID_A);
             let b = bus.read_byte(addr, REG_ID_B);
-            matches!(a, Ok(0x1A | 0x1B | 0x1C)) && matches!(b, Ok(0x01 | 0x03 | 0x04))
+            matches!(a, Ok(0x1A..=0x1C)) && matches!(b, Ok(0x01 | 0x03 | 0x04))
         })
         .collect()
 }
@@ -72,6 +72,11 @@ pub fn read_info(bus: &mut dyn Bus, addr: StickAddr) -> Result<StickInfo, RamErr
         return Err(RamError::UnsupportedProduct(product_id));
     }
     Ok(StickInfo { addr, product_id, protocol: data[28] })
+}
+
+/// Every detected stick whose device info reads back correctly, in address order.
+pub fn sticks(bus: &mut dyn Bus) -> Vec<StickInfo> {
+    detect(bus).into_iter().filter_map(|addr| read_info(bus, addr).ok()).collect()
 }
 
 use crate::effects::{Rgb, Settings};
@@ -161,8 +166,8 @@ pub fn apply_builtin(bus: &mut dyn Bus, stick: &StickInfo, settings: &Settings) 
 fn static_colors(settings: &Settings) -> [u8; LED_COUNT * 4] {
     let Rgb(r, g, b) = settings.color1;
     let mut colors = [0u8; LED_COUNT * 4];
-    for led in colors.chunks_exact_mut(4) {
-        led.copy_from_slice(&[r, g, b, 255]);
+    for led in colors.as_chunks_mut::<4>().0 {
+        *led = [r, g, b, 255];
     }
     colors
 }
@@ -207,8 +212,8 @@ pub fn write_direct(bus: &mut dyn Bus, stick: &StickInfo, leds: &[Rgb; LED_COUNT
     }
     let mut packet = [0u8; 2 + LED_COUNT * 3];
     packet[0] = LED_COUNT as u8;
-    for (slot, led) in packet[1..].chunks_exact_mut(3).zip(leds) {
-        slot.copy_from_slice(&[led.0, led.1, led.2]);
+    for (slot, led) in packet[1..].as_chunks_mut::<3>().0.iter_mut().zip(leds) {
+        *slot = [led.0, led.1, led.2];
     }
     packet[31] = crate::crc::crc8(&packet[..31]);
     bus.write_block(stick.addr, REG_DIRECT_BLOCK, &packet)?;
@@ -299,6 +304,24 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(read_info(&mut bus, addr(0x58)), Err(RamError::ChecksumMismatch));
+    }
+
+    #[test]
+    fn sticks_keeps_only_detected_sticks_whose_info_reads() {
+        let mut bus = FakeBus { info: info_block(0x0101, 4), ..Default::default() };
+        for a in [0x58, 0x59] {
+            bus.regs.insert((a, REG_ID_A), 0x1C);
+            bus.regs.insert((a, REG_ID_B), 0x03);
+        }
+        let found = sticks(&mut bus);
+        assert_eq!(found.iter().map(|s| s.addr()).collect::<Vec<_>>(), vec![addr(0x58), addr(0x59)]);
+        assert!(found.iter().all(|s| s.product_id() == 0x0101 && s.protocol() == 4));
+
+        let mut bad = FakeBus { info: info_block(0x0101, 4), corrupt_checksum: true, ..Default::default() };
+        bad.regs.insert((0x58, REG_ID_A), 0x1C);
+        bad.regs.insert((0x58, REG_ID_B), 0x03);
+        assert!(sticks(&mut bad).is_empty(), "a stick whose info fails is left out");
+        assert!(sticks(&mut FakeBus::default()).is_empty());
     }
 
     #[test]

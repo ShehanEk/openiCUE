@@ -128,7 +128,10 @@ fn on_events(hwnd: HWND) {
                     a.model.start_arrange(picker.count());
                     a.picker = Some(picker);
                 }
-                None => a.model.screen = Screen::Done,
+                None => {
+                    a.model.screen = Screen::Done;
+                    install::start_restore();
+                }
             }
         }
         invalidate(hwnd);
@@ -136,11 +139,12 @@ fn on_events(hwnd: HWND) {
 }
 
 /// Leaves the picker: drops it, which sets the sticks black and releases
-/// the claim, then shows Done.
+/// the claim, then shows Done and puts the saved effect back.
 fn end_picker(hwnd: HWND) {
     if let Some(a) = app(hwnd) {
         a.picker = None;
         a.model.screen = Screen::Done;
+        install::start_restore();
     }
 }
 
@@ -155,8 +159,13 @@ fn light(hwnd: HWND, stick: usize) {
 
 /// Close, Esc and Alt+F4: put the lights out first if the picker is open.
 fn close(hwnd: HWND) {
-    if let Some(a) = app(hwnd) {
-        a.picker = None;
+    // The picker only opens after a successful install, so the effect is
+    // put back once it has released the claim.
+    let picker = app(hwnd).and_then(|a| a.picker.take());
+    if picker.is_some() {
+        // Sets the sticks black and releases the claim before the engine starts.
+        drop(picker);
+        install::start_restore();
     }
     destroy(hwnd);
 }
@@ -195,7 +204,7 @@ fn click(hwnd: HWND, target: Target) {
             }
         }
         (Target::Primary, Screen::Welcome) => {
-            start_work(hwnd, |report| install::run_install(report));
+            start_work(hwnd, install::run_install);
         }
         (Target::Primary, Screen::Uninstall) => {
             let Some(remove_pawnio) = app(hwnd).map(|a| {
@@ -345,12 +354,13 @@ pub fn run(uninstall: bool) -> i32 {
             cbClsExtra: 0,
             cbWndExtra: 0,
             hInstance: instance,
-            hIcon: null_mut(),
+            // Icon id 1, embedded from assets/openicue.res.
+            hIcon: LoadIconW(instance, 1 as _),
             hCursor: LoadCursorW(null_mut(), IDC_ARROW),
             hbrBackground: null_mut(),
             lpszMenuName: null(),
             lpszClassName: class.as_ptr(),
-            hIconSm: null_mut(),
+            hIconSm: LoadIconW(instance, 1 as _),
         };
         RegisterClassExW(&wc);
 

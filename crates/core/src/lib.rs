@@ -9,6 +9,7 @@ pub mod order;
 pub mod pawnio;
 pub mod ram;
 pub mod system;
+pub mod win;
 
 #[cfg(test)]
 pub mod fake;

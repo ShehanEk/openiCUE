@@ -55,7 +55,7 @@ unsafe fn create_inner(link: &Path, target: &Path) -> Result<(), i32> {
     let shell_link = Com(raw);
     let target_w = wide(target);
     let dir_w = wide(target.parent().ok_or(-1)?);
-    let description: Vec<u16> = "Change your RAM lighting".encode_utf16().chain(std::iter::once(0)).collect();
+    let description = openicue_core::win::wide("Change your RAM lighting");
 
     type SetText = extern "system" fn(*mut c_void, PCWSTR) -> HRESULT;
     let set_path: SetText = std::mem::transmute(shell_link.slot(20));

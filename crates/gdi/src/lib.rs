@@ -1,4 +1,6 @@
 //! GDI+ drawing shared by the openiCUE window and Setup.
+// Graphics handles passed in only ever come from BeginPaint or the Canvas.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 use std::ptr::null_mut;
 use windows_sys::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, SelectObject, HDC, SRCCOPY,
@@ -136,6 +138,8 @@ impl Canvas {
         self.draw_string(g, text, font, rect, color, a, StringAlignmentNear);
     }
 
+    // One private helper behind 	ext and wrapped; a struct would be churn.
+    #[allow(clippy::too_many_arguments)]
     fn draw_string(&self, g: Graphics, text: &str, font: usize, rect: Rect, color: u32, a: Align, line_align: i32) {
         let wide = wide(text);
         let mut brush = null_mut();
@@ -173,7 +177,7 @@ impl Canvas {
     pub fn glow(&self, g: Graphics, r: Rect, center: u32) {
         let mut path = null_mut();
         let mut brush = null_mut();
-        let mut edge = center & 0x00FF_FFFF;
+        let edge = center & 0x00FF_FFFF;
         let mut count = 1;
         // SAFETY: live GDI+ objects; path and brush are deleted here.
         unsafe {
@@ -181,7 +185,7 @@ impl Canvas {
             GdipAddPathEllipse(path, r.x - 16.0, r.y - 16.0, r.w + 32.0, r.h + 32.0);
             GdipCreatePathGradientFromPath(path, &mut brush);
             GdipSetPathGradientCenterColor(brush, center);
-            GdipSetPathGradientSurroundColorsWithCount(brush, &mut edge, &mut count);
+            GdipSetPathGradientSurroundColorsWithCount(brush, &edge, &mut count);
             GdipFillPath(g, brush.cast(), path);
             GdipDeleteBrush(brush.cast());
             GdipDeletePath(path);

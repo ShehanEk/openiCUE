@@ -43,13 +43,6 @@ fn main() {
     std::process::exit(code);
 }
 
-fn sticks(bus: &mut dyn Bus) -> Vec<StickInfo> {
-    ram::detect(bus)
-        .into_iter()
-        .filter_map(|addr| ram::read_info(bus, addr).ok())
-        .collect()
-}
-
 fn run(restore: bool) -> i32 {
     // Open the stop event before claiming, so a window that sees the claim
     // always finds the event to signal. An engine that loses the claim
@@ -68,7 +61,7 @@ fn run(restore: bool) -> i32 {
         return 0;
     }
     let Ok(mut bus) = PawnIoBus::open() else { return 5 };
-    let found = sticks(&mut bus);
+    let found = ram::sticks(&mut bus);
     if found.is_empty() {
         return 6;
     }

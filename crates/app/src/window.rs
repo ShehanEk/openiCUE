@@ -64,7 +64,7 @@ impl App {
 /// The engine runs the saved effect, which may differ from the one on screen.
 fn sync_running(hwnd: HWND) {
     let saved = system::load_settings();
-    let running = (control::engine_running() && saved.runs_in_software()).then_some(saved.effect);
+    let running = (system::engine_claimed() && saved.runs_in_software()).then_some(saved.effect);
     let Some(a) = app(hwnd) else { return };
     if running != a.model.running {
         a.model.live = None;
@@ -270,7 +270,7 @@ fn tenth(x: f32) -> f32 {
 /// Every 2 s while an effect runs: measure the engine and remember the cost.
 /// Whether it runs comes from its claim; a failed measurement only skips a sample.
 fn sample_cost(hwnd: HWND) {
-    if !control::engine_running() {
+    if !system::engine_claimed() {
         // The engine exited by itself, for example after repeated bus errors.
         finish(hwnd, Ok(()), "Background process stopped");
         return;
@@ -466,12 +466,13 @@ pub fn run() -> i32 {
             cbClsExtra: 0,
             cbWndExtra: 0,
             hInstance: instance,
-            hIcon: null_mut(),
+            // Icon id 1, embedded from assets/openicue.res.
+            hIcon: LoadIconW(instance, 1 as _),
             hCursor: LoadCursorW(null_mut(), IDC_ARROW),
             hbrBackground: null_mut(),
             lpszMenuName: null(),
             lpszClassName: class.as_ptr(),
-            hIconSm: null_mut(),
+            hIconSm: LoadIconW(instance, 1 as _),
         };
         RegisterClassExW(&wc);
 

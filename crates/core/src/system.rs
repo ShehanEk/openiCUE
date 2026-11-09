@@ -3,6 +3,7 @@ use crate::config;
 use crate::costs::{self, Costs};
 use crate::effects::Settings;
 use crate::order::{self, StickOrder};
+use crate::win::wide;
 use std::ffi::OsString;
 use std::io::Read;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -50,10 +51,6 @@ const READ_CONTROL: u32 = 0x0002_0000;
 const FILE_SHARE_READ_WRITE: u32 = 0x1 | 0x2;
 const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(std::iter::once(0)).collect()
-}
 
 fn last_error() -> u32 {
     // SAFETY: takes no arguments and only reads this thread's last error.
@@ -425,11 +422,6 @@ impl Drop for EngineClaim {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn wide_strings_end_in_nul() {
-        assert_eq!(wide("ab"), vec![b'a' as u16, b'b' as u16, 0]);
-    }
 
     #[test]
     fn only_administrators_and_system_are_trusted_owners() {

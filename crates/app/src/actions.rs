@@ -71,10 +71,7 @@ impl Hardware {
     pub fn begin_arrange(&mut self) -> Result<Arranging, String> {
         stop_first()?;
         let Ok(Some(claim)) = system::claim_engine() else { return Err(BUSY.to_string()) };
-        let sticks: Vec<ram::StickInfo> = ram::detect(&mut self.bus)
-            .into_iter()
-            .filter_map(|addr| ram::read_info(&mut self.bus, addr).ok())
-            .collect();
+        let sticks = ram::sticks(&mut self.bus);
         if sticks.len() < 2 {
             return Err("Stick order needs at least 2 sticks that answer. Close other RGB apps and try again.".to_string());
         }
@@ -103,7 +100,8 @@ pub fn restore_saved(hardware: Option<&mut Hardware>) -> Result<(), String> {
 }
 
 /// How long a fresh engine gets to claim its lock before we call it failed.
-const START_TIMEOUT: Duration = Duration::from_secs(1);
+/// A fresh build can start slowly while antivirus scans it; 1 s reported failure while it ran on.
+const START_TIMEOUT: Duration = Duration::from_secs(5);
 const START_POLL: Duration = Duration::from_millis(50);
 
 /// For effects drawn in software (custom, or built-ins kept in sync): saves the
@@ -115,7 +113,7 @@ pub fn apply_custom(settings: &Settings) -> Result<(), String> {
     system::save_settings(settings).map_err(|_| "Couldn't save the effect.".to_string())?;
     control::start_engine().map_err(|_| NOT_STARTED.to_string())?;
     let deadline = std::time::Instant::now() + START_TIMEOUT;
-    while !control::engine_running() {
+    while !system::engine_claimed() {
         if std::time::Instant::now() >= deadline {
             return Err(NOT_STARTED.to_string());
         }
