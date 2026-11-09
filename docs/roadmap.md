@@ -5,6 +5,7 @@
 - **Plan 1 (core and hardware):** complete. Verified on the target PC; see `hardware-findings.md`.
 - **Plan 2 (window):** complete. Stage 8 passed on 2026-11-08: Breathing costs 1.5 MB · 0.8% CPU.
 - **Plan 3 (installer):** complete. Sandbox (stage 9) and real install (stage 10) passed on 2026-11-08.
+- **2026-11-09:** final whole-project review fixes and the logo icon (logo C) shipped in `7186ce7`, and the user reinstalled. All plans done.
 
 ## Locked decisions
 

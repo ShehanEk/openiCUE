@@ -146,3 +146,11 @@ Builds: `openiCUE-Setup.exe` (4,591,616 bytes, SHA-256 `9A4337DF…`, commit `36
 
 - **Install:** the user installed `openiCUE-Setup.exe` (`9A4337DF…`) and opened openiCUE. The user reports "all ok".
 - **Stop and restore (confirmed):** the window's Stop works, and restore at logon works: Breathing comes back after a restart, with no window and no UAC prompt. Stage 10 passed.
+
+## 2026-11-09: Final fixes and logo, reinstalled
+
+Commit `7186ce7`:
+- **Fixes:** the engine start wait is now 5 s; Setup restores the effect after install; the uninstall entry is written early; clippy is clean; shared helpers.
+- **Logo:** logo C ("glowing stick") is the icon for the app and Setup.
+
+The user reinstalled with the new Setup. The icon shows, and the effect came back right after install.
