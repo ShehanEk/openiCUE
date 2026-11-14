@@ -12,7 +12,7 @@ body:
     id: report
     attributes:
       label: Report from openiCUE
-      description: Filled in by openiCUE. If you copied it instead, paste it here.
+      description: openiCUE copied the report for you. Click here and press Ctrl+V.
       render: text
     validations:
       required: true

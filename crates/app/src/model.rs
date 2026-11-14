@@ -19,7 +19,9 @@ pub enum Screen {
 pub const REPORT_TITLE: &str = "Report an unsupported stick";
 pub const REPORT_BODY: &str = "openiCUE found a Corsair stick it doesn't support yet, so it hasn't changed its lighting. This report helps add support for it. On GitHub, add your RAM's model from the label on the stick.";
 pub const REPORT_PRIVACY: &str = "Your sticks' serial numbers are left out. This report only includes the vendor, product ID, firmware and protocol openiCUE needs to add support.";
-pub const REPORT_FOOTER: &str = "Opens github.com in your browser. Submitting needs a GitHub account.";
+pub const REPORT_FOOTER: &str = "Copies the report and opens github.com. Paste it into the form. Needs a GitHub account.";
+/// The longest link Explorer passes on whole.
+pub const MAX_LINK: usize = 259;
 /// Where reports go: the project's issue form for unsupported RAM.
 const ISSUE_FORM: &str = "https://github.com/ShehanEk/openiCUE/issues/new?template=unsupported-ram.yml";
 
@@ -324,11 +326,16 @@ impl Model {
         lines.join("\n")
     }
 
-    /// A new issue on the project's unsupported-RAM form, with the report filled in.
+    /// A new issue on the project's unsupported-RAM form, with the title filled
+    /// in. The report itself goes on the clipboard: Explorer, which opens the
+    /// link as the signed-in user, cuts links at 259 characters (user test,
+    /// 2026-11-15), and the report alone needs about 400.
     pub fn report_url(&self) -> String {
-        let products: Vec<String> = self.unsupported.iter().map(|(_, s)| format!("0x{:04X}", s.product_id)).collect();
-        let title = format!("Unsupported RAM: product {}", products.join(", "));
-        format!("{ISSUE_FORM}&title={}&report={}", url_encode(&title), url_encode(&self.report_text()))
+        let mut products: Vec<String> = self.unsupported.iter().map(|(_, s)| format!("0x{:04X}", s.product_id)).collect();
+        products.sort();
+        products.dedup();
+        let url = format!("{ISSUE_FORM}&title={}", url_encode(&format!("Unsupported RAM: product {}", products.join(", "))));
+        if url.len() <= MAX_LINK { url } else { format!("{ISSUE_FORM}&title={}", url_encode("Unsupported RAM")) }
     }
 
     pub fn back(&mut self) {
@@ -967,15 +974,17 @@ mod tests {
     }
 
     #[test]
-    fn report_url_fills_the_issue_form_safely() {
+    fn report_url_fits_explorer_and_is_safe() {
         let url = with_unsupported().report_url();
-        assert!(url.starts_with("https://github.com/ShehanEk/openiCUE/issues/new?template=unsupported-ram.yml&title=Unsupported%20RAM%3A%20product%200x0201&report=openiCUE%20"));
+        assert_eq!(url, "https://github.com/ShehanEk/openiCUE/issues/new?template=unsupported-ram.yml&title=Unsupported%20RAM%3A%20product%200x0201");
         // Only unreserved characters and escapes after the fixed prefix: no
         // stray `&`, `#` or spaces that could change the link.
         let query = &url[url.find("&title=").unwrap()..];
         assert!(query.chars().all(|c| c.is_ascii_alphanumeric() || "-._~%&=".contains(c)), "{query}");
-        assert_eq!(query.matches('&').count(), 2);
-        assert!(url.contains("%0A%20%20Product%20%20%20%200x0201"));
+        // Even with many different unknown sticks, the link stays whole.
+        let mut many = with_unsupported();
+        many.unsupported = (0..8u16).map(|i| (0x58 + i as u8, InfoSummary { product_id: 0x0200 + i, ..many.unsupported[0].1 })).collect();
+        assert!(many.report_url().len() <= MAX_LINK, "{}", many.report_url().len());
     }
 
     #[test]

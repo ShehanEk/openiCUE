@@ -152,7 +152,7 @@ See [`docs/roadmap.md`](docs/roadmap.md) for status and design decisions.
 
 Issues and pull requests are welcome.
 
-**Unsupported RAM:** when openiCUE finds a Corsair stick it doesn't support yet, it leaves that stick alone and shows **Report it** under the preview. The button shows the report first, then opens a pre-filled GitHub issue in your browser. Nothing is sent without you, and openiCUE itself never connects to the internet. Your sticks' serial numbers are left out: the report only includes the vendor, product ID, firmware and protocol openiCUE needs to add support.
+**Unsupported RAM:** when openiCUE finds a Corsair stick it doesn't support yet, it leaves that stick alone and shows **Report it** under the preview. The button shows the report first, then copies it and opens a GitHub issue form in your browser, where you paste it. Nothing is sent without you, and openiCUE itself never connects to the internet. Your sticks' serial numbers are left out: the report only includes the vendor, product ID, firmware and protocol openiCUE needs to add support.
 
 Developers can also read the same details with `openicue-hwtest idblock`, run from an administrator terminal. `idblock` only reads, and changes no lighting. Build the tool with `cargo build --release -p openicue-hwtest`.
 

@@ -361,10 +361,17 @@ fn click(hwnd: HWND, target: Target) {
             }
         }
         Target::OpenIssue => {
-            let Some(url) = app(hwnd).map(|a| a.model.report_url()) else { return };
-            let opened = crate::shell::open_link(&url);
+            // The report goes on the clipboard, then the form opens for pasting.
+            let Some((text, url)) = app(hwnd).map(|a| (a.model.report_text(), a.model.report_url())) else { return };
+            let copied = crate::shell::copy_text(hwnd, &text);
+            let opened = copied && crate::shell::open_link(&url);
             if let Some(a) = app(hwnd) {
-                a.model.message = if opened { "Opened in your browser" } else { "Couldn't open your browser. Copy the report instead." }.to_string();
+                a.model.message = match (copied, opened) {
+                    (true, true) => "Report copied. Paste it into the GitHub form",
+                    (true, false) => "Report copied, but your browser didn't open",
+                    _ => "Couldn't copy the report. Try again.",
+                }
+                .to_string();
             }
         }
         Target::Preview => {

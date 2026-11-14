@@ -59,12 +59,14 @@ pub fn copy_text(hwnd: HWND, text: &str) -> bool {
     }
 }
 
-/// Opens an https link in the user's browser, without admin rights.
+/// Opens an https link of up to 259 characters in the user's browser,
+/// without admin rights.
 /// The window runs as admin, and a browser started straight from it would
 /// be too. Explorer hands the link to the signed-in user's shell instead.
 /// Explorer comes from the Windows folder by full path, never a search.
 pub fn open_link(url: &str) -> bool {
-    if !url.starts_with("https://") || url.contains('"') {
+    // Explorer cuts longer links, so refuse rather than open half of one.
+    if !url.starts_with("https://") || url.contains('"') || url.len() > openicue::model::MAX_LINK {
         return false;
     }
     let mut dir = [0u16; 260];
