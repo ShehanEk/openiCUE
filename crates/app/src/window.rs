@@ -70,11 +70,15 @@ impl App {
         match actions::startup() {
             Startup::NoDriver => self.model.screen = Screen::NoDriver,
             Startup::NoSticks => self.model.screen = Screen::NoSticks,
-            Startup::Ready(hardware, families) => {
-                let count = families.len();
+            Startup::Ready(hardware, found) => {
+                let count = found.families.len();
                 self.model.screen = Screen::App;
                 self.model.sticks = count;
-                self.model.families = families;
+                self.model.families = found.families;
+                self.model.unsupported = found.unsupported;
+                if !self.model.unsupported.is_empty() && self.model.os.is_empty() {
+                    self.model.os = crate::shell::os_label();
+                }
                 self.model.order = StickOrder::or_identity(system::load_order(), count);
                 self.hardware = Some(hardware);
             }
@@ -349,6 +353,20 @@ fn click(hwnd: HWND, target: Target) {
         }
         Target::Apply => apply(hwnd),
         Target::Stop => stop(hwnd),
+        Target::CopyReport => {
+            let Some(text) = app(hwnd).map(|a| a.model.report_text()) else { return };
+            let copied = crate::shell::copy_text(hwnd, &text);
+            if let Some(a) = app(hwnd) {
+                a.model.message = if copied { "Report copied" } else { "Couldn't copy the report. Try again." }.to_string();
+            }
+        }
+        Target::OpenIssue => {
+            let Some(url) = app(hwnd).map(|a| a.model.report_url()) else { return };
+            let opened = crate::shell::open_link(&url);
+            if let Some(a) = app(hwnd) {
+                a.model.message = if opened { "Opened in your browser" } else { "Couldn't open your browser. Copy the report instead." }.to_string();
+            }
+        }
         Target::Preview => {
             let Some(a) = app(hwnd) else { return };
             a.advance_details();
@@ -370,6 +388,7 @@ fn click(hwnd: HWND, target: Target) {
                 Target::RemoveColor => a.model.remove_color(),
                 Target::Reverse => a.model.toggle_reverse(),
                 Target::Settings => a.model.open_settings(),
+                Target::ReportIt => a.model.open_report(),
                 _ => {}
             }
         }
@@ -511,9 +530,9 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
         }
         WM_KEYDOWN => {
             if wparam == VK_ESCAPE as usize {
-                // Esc is Back on Settings and Cancel in the picker; elsewhere it closes.
+                // Esc is Back on Settings and the report, and Cancel in the picker; elsewhere it closes.
                 match app(hwnd).map(|a| a.model.screen) {
-                    Some(Screen::Settings) => click(hwnd, Target::Back),
+                    Some(Screen::Settings | Screen::Report) => click(hwnd, Target::Back),
                     Some(Screen::Arrange) => click(hwnd, Target::Cancel),
                     _ => close(hwnd),
                 }

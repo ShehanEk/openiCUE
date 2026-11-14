@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 mod actions;
 mod paint;
+mod shell;
 mod window;
 
 fn main() {

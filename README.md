@@ -79,7 +79,7 @@ Vendor RGB suites are large, always running, and want an account. openiCUE does 
 | AMD (SMBus PIIX4), e.g. B550 | ✅ Tested |
 | Intel | ❌ Not yet supported |
 
-Have a different kit? Please [open an issue](../../issues); see [Contributing](#contributing) for what to include.
+Have a different kit? openiCUE's **Report it** button sends us what we need; see [Contributing](#contributing).
 
 openiCUE writes only to addresses `0x58`–`0x5F`, and only to sticks that pass detection and identification. See [`docs/hardware-findings.md`](docs/hardware-findings.md) for the full test log.
 
@@ -150,7 +150,11 @@ See [`docs/roadmap.md`](docs/roadmap.md) for status and design decisions.
 
 ## Contributing
 
-Issues and pull requests are welcome. For hardware support, please include your motherboard, your RAM's model and the output of `openicue-hwtest idblock`, run from an administrator terminal. `idblock` only reads, and changes no lighting. Build the tool with `cargo build --release -p openicue-hwtest`.
+Issues and pull requests are welcome.
+
+**Unsupported RAM:** when openiCUE finds a Corsair stick it doesn't support yet, it leaves that stick alone and shows **Report it** under the preview. The button shows the report first, then opens a pre-filled GitHub issue in your browser. Nothing is sent without you, and openiCUE itself never connects to the internet. Your sticks' serial numbers are left out: the report only includes the vendor, product ID, firmware and protocol openiCUE needs to add support.
+
+Developers can also read the same details with `openicue-hwtest idblock`, run from an administrator terminal. `idblock` only reads, and changes no lighting. Build the tool with `cargo build --release -p openicue-hwtest`.
 
 ## Acknowledgements
 

@@ -16,23 +16,43 @@ pub struct Hardware {
 pub enum Startup {
     NoDriver,
     NoSticks,
-    /// Each found stick's model line, in address order.
-    Ready(Hardware, Vec<Option<ram::Family>>),
+    Ready(Hardware, Found),
+}
+
+/// The sticks found at start.
+pub struct Found {
+    /// Each supported stick's model line, in address order, as the engine
+    /// and the stick order count them. `None` if its info didn't read back.
+    pub families: Vec<Option<ram::Family>>,
+    /// Corsair sticks that answered but aren't supported yet, for reporting.
+    pub unsupported: Vec<(u8, ram::InfoSummary)>,
 }
 
 /// Opens PawnIO and finds the sticks, then reads each one's info block for
 /// its model. Detection only reads ID registers. The info read also selects
 /// the block to read, but changes no lighting, and an engine's direct writes
-/// use a different register, so it's safe while an engine animates. A stick
-/// whose info doesn't read back still counts, with no model.
+/// use a different register, so it's safe while an engine animates.
 pub fn startup() -> Startup {
     let Ok(mut bus) = PawnIoBus::open() else { return Startup::NoDriver };
-    let found = ram::detect(&mut bus);
-    if found.is_empty() {
+    let mut found = Found { families: Vec::new(), unsupported: Vec::new() };
+    for addr in ram::detect(&mut bus) {
+        match ram::read_info_block(&mut bus, addr) {
+            Ok((data, true)) => {
+                let summary = ram::InfoSummary::of(&data);
+                if summary.is_supported() {
+                    found.families.push(Some(ram::Family::of(summary.product_id)));
+                } else {
+                    found.unsupported.push((addr.get(), summary));
+                }
+            }
+            // A stick whose info doesn't read back still counts, with no model.
+            _ => found.families.push(None),
+        }
+    }
+    if found.families.is_empty() && found.unsupported.is_empty() {
         return Startup::NoSticks;
     }
-    let families = found.iter().map(|&addr| ram::read_info(&mut bus, addr).ok().map(|i| i.family())).collect();
-    Startup::Ready(Hardware { bus }, families)
+    Startup::Ready(Hardware { bus }, found)
 }
 
 fn stop_first() -> Result<(), String> {

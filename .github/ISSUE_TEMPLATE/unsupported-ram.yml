@@ -1,0 +1,30 @@
+name: Unsupported RAM
+description: openiCUE found a Corsair stick it doesn't support yet.
+title: "Unsupported RAM: "
+labels: ["hardware support"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping openiCUE support more memory. The report below comes from openiCUE's **Report it** button.
+        Your sticks' serial numbers are left out. The report only includes the vendor, product ID, firmware and protocol openiCUE needs to add support.
+  - type: textarea
+    id: report
+    attributes:
+      label: Report from openiCUE
+      description: Filled in by openiCUE. If you copied it instead, paste it here.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: RAM model
+      description: From the label on the stick, such as CMT32GX4M2C3600C18.
+    validations:
+      required: true
+  - type: input
+    id: board
+    attributes:
+      label: Motherboard
+      description: Optional, such as Gigabyte B550 AORUS ELITE.

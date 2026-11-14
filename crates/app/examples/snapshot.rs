@@ -5,7 +5,7 @@
 #[path = "../src/paint.rs"]
 mod paint;
 
-use openicue::model::{Family, Model};
+use openicue::model::{Family, InfoSummary, Model, Screen};
 use openicue_core::effects::{Direction, Effect, Settings};
 use openicue_core::order::StickOrder;
 use std::ptr::null_mut;
@@ -50,6 +50,23 @@ fn main() {
         m.order = StickOrder::identity(4);
         m.details_open = open;
         m.details_progress = 1.0;
+        let path = out.join(format!("{name}.bmp"));
+        render(&painter, &m, &path);
+        println!("{}", path.display());
+    }
+    // An unsupported stick: the notice with the tallest settings, and the report.
+    for (name, effect, screen) in [
+        ("report-notice", Effect::ColorWave, Screen::App),
+        ("report-notice-chase", Effect::Chase, Screen::App),
+        ("report-screen", Effect::RainbowWave, Screen::Report),
+    ] {
+        let mut m = Model::new(Settings { effect, ..Settings::default() });
+        m.sticks = 3;
+        m.families = vec![Some(Family::Pro); 3];
+        m.order = StickOrder::identity(3);
+        m.os = "Windows 11, build 26200".into();
+        m.unsupported = vec![(0x5B, InfoSummary { vendor: 0x1B1C, product_id: 0x0201, firmware: (0, 6, 36), protocol: 4 })];
+        m.screen = screen;
         let path = out.join(format!("{name}.bmp"));
         render(&painter, &m, &path);
         println!("{}", path.display());

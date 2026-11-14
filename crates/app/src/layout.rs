@@ -36,6 +36,8 @@ pub enum Font {
     Heading,
     /// 22 px light, the stick number in a picker slot.
     SlotNumber,
+    /// 13 px monospace, the report as sent.
+    Mono,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,6 +45,11 @@ pub enum Target {
     Close,
     /// The LED preview: a click shows or hides each stick's model.
     Preview,
+    /// "Report it", in the bar about sticks that aren't supported yet.
+    ReportIt,
+    /// On the report screen.
+    CopyReport,
+    OpenIssue,
     Effect(Effect),
     /// Colour 1 to 4.
     Color(u8),
@@ -152,6 +159,13 @@ pub struct Layout {
     pub lines: Vec<Rect>,
     /// The saved order's small slots, left to right.
     pub order_slots: Vec<Rect>,
+    /// The "not supported yet" bar under the preview; its text sits in `notice_text`.
+    pub notice: Option<Rect>,
+    pub notice_text: Option<Rect>,
+    /// The report screen: the report's box, the privacy note and the footer note.
+    pub report_box: Option<Rect>,
+    pub privacy: Option<Rect>,
+    pub footer: Option<Rect>,
     pub buttons: Vec<Button>,
 }
 
@@ -203,11 +217,17 @@ pub fn layout(model: &Model, measure: &dyn Fn(&str, Font) -> f32) -> Layout {
         row_note: None,
         lines: Vec::new(),
         order_slots: Vec::new(),
+        notice: None,
+        notice_text: None,
+        report_box: None,
+        privacy: None,
+        footer: None,
         buttons: vec![Button { rect: close, target: Target::Close }],
     };
     match model.screen {
         Screen::Settings => return settings_screen(out, model, measure),
         Screen::Arrange => return arrange_screen(out, model, measure),
+        Screen::Report => return report_screen(out, model, measure),
         _ => {}
     }
     if model.screen != Screen::App {
@@ -234,6 +254,19 @@ pub fn layout(model: &Model, measure: &dyn Fn(&str, Font) -> f32) -> Layout {
     out.preview = Some(preview);
     out.buttons.push(Button { rect: preview, target: Target::Preview });
     let mut y = preview.y + preview.h + 28.0;
+
+    // Sticks that aren't supported yet: a bar with "Report it" (design, 2026-11-15).
+    if let Some(text) = model.unsupported_notice() {
+        let bar = Rect { x: SIDE, y: preview.y + preview.h + 16.0, w: CONTENT_RIGHT - SIDE, h: 52.0 };
+        let w = 40.0 + measure("Report it", Font::Body);
+        let button = Rect { x: bar.x + bar.w - 4.0 - w, y: bar.y + 4.0, w, h: PILL_H };
+        out.buttons.push(Button { rect: button, target: Target::ReportIt });
+        // A 7 px dot 16 px in, then the text 10 px after it.
+        let text_x = bar.x + 16.0 + 7.0 + 10.0;
+        out.notice_text = Some(Rect { x: text_x, y: bar.y, w: (button.x - 16.0 - text_x).min(measure(&text, Font::Body) + 4.0), h: bar.h });
+        out.notice = Some(bar);
+        y = bar.y + bar.h + 20.0;
+    }
 
     // A running effect's tile has room for its dot. Built-ins kept in sync run too.
     let tile = |e| {
@@ -417,6 +450,38 @@ fn lines(text: &str, font: Font, width: f32, measure: &dyn Fn(&str, Font) -> f32
 
 /// "‹ Back", "Settings", then one row: "Stick order", its note and the saved
 /// order as small slots, with "Change" on the right, between two lines.
+/// "Report an unsupported stick": the heading, why, the report as sent, the
+/// privacy note, then the footer note with Copy report and Open GitHub issue.
+fn report_screen(mut out: Layout, model: &Model, measure: &dyn Fn(&str, Font) -> f32) -> Layout {
+    let w = 12.0 + 11.0 + 8.0 + measure("Back", Font::Small) + 12.0;
+    out.buttons.push(Button { rect: Rect { x: 20.0, y: 0.0, w, h: TITLE_H }, target: Target::Back });
+
+    let text_w = 640.0;
+    let mut y = TITLE_H + 16.0;
+    out.heading = Some(Rect { x: SIDE, y, w: CONTENT_RIGHT - SIDE, h: 40.0 });
+    y += 40.0 + 10.0;
+    let h = 19.0 * lines(model::REPORT_BODY, Font::Body, text_w, measure);
+    out.body = Some(Rect { x: SIDE, y, w: text_w, h });
+    y += h + 20.0;
+    // 16 px padding, 20 px a line.
+    let report_lines = model.report_text().lines().count() as f32;
+    let report = Rect { x: SIDE, y, w: CONTENT_RIGHT - SIDE, h: 32.0 + 20.0 * report_lines };
+    out.report_box = Some(report);
+    y += report.h + 16.0;
+    // A 16 px lock, 10 px, then the note.
+    let note_w = text_w - 26.0;
+    out.privacy = Some(Rect { x: SIDE + 26.0, y, w: note_w, h: 18.0 * lines(model::REPORT_PRIVACY, Font::Small, note_w, measure) });
+
+    let open_w = 48.0 + measure("Open GitHub issue", Font::BodyBold);
+    let open = Rect { x: CONTENT_RIGHT - open_w, y: BOTTOM - PILL_H, w: open_w, h: PILL_H };
+    let copy_w = 40.0 + measure("Copy report", Font::Body);
+    let copy = Rect { x: open.x - 8.0 - copy_w, y: open.y, w: copy_w, h: PILL_H };
+    out.buttons.push(Button { rect: copy, target: Target::CopyReport });
+    out.buttons.push(Button { rect: open, target: Target::OpenIssue });
+    out.footer = Some(Rect { x: SIDE, y: open.y, w: copy.x - 24.0 - SIDE, h: PILL_H });
+    out
+}
+
 fn settings_screen(mut out: Layout, model: &Model, measure: &dyn Fn(&str, Font) -> f32) -> Layout {
     // Chevron 11, gap 8, label, with 12 px padding, from the design's 20 px edge.
     let w = 12.0 + 11.0 + 8.0 + measure("Back", Font::Small) + 12.0;

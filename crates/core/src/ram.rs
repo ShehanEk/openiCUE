@@ -30,6 +30,17 @@ pub enum Family {
     Rs,
 }
 
+impl Family {
+    /// The model line of a supported product ID, from its high byte.
+    pub fn of(product_id: u16) -> Family {
+        match product_id >> 8 {
+            0x03 => Family::ProSl,
+            0x04 => Family::Rs,
+            _ => Family::Pro,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct StickInfo {
     addr: StickAddr,
@@ -52,11 +63,7 @@ impl StickInfo {
 
     /// The model line, from the product ID's high byte.
     pub fn family(&self) -> Family {
-        match self.product_id >> 8 {
-            0x03 => Family::ProSl,
-            0x04 => Family::Rs,
-            _ => Family::Pro,
-        }
+        Family::of(self.product_id)
     }
 
     /// 6 on a Vengeance RGB RS, 10 on the others.
@@ -108,6 +115,32 @@ pub fn read_info_block(bus: &mut dyn Bus, addr: StickAddr) -> Result<([u8; 32], 
     }
     let checksum_ok = bus.read_byte(addr, REG_CHECKSUM)? == crate::crc::crc8(&data);
     Ok((data, checksum_ok))
+}
+
+/// What a stick's info block says about it, without bytes 12-23, which
+/// differ between identical sticks (likely a serial number).
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub struct InfoSummary {
+    pub vendor: u16,
+    pub product_id: u16,
+    /// As OpenRGB shows it: major.minor.build.
+    pub firmware: (u8, u8, u16),
+    pub protocol: u8,
+}
+
+impl InfoSummary {
+    pub fn of(data: &[u8; 32]) -> InfoSummary {
+        InfoSummary {
+            vendor: u16::from_le_bytes([data[0], data[1]]),
+            product_id: u16::from_le_bytes([data[2], data[3]]),
+            firmware: (data[9], data[8], u16::from_le_bytes([data[10], data[11]])),
+            protocol: data[28],
+        }
+    }
+
+    pub fn is_supported(&self) -> bool {
+        SUPPORTED_PRODUCT_IDS.contains(&self.product_id)
+    }
 }
 
 pub fn read_info(bus: &mut dyn Bus, addr: StickAddr) -> Result<StickInfo, RamError> {
@@ -720,6 +753,19 @@ mod tests {
             assert_eq!(info.led_count(), 6);
         }
         assert_eq!(stick(4).led_count(), 10);
+    }
+
+    #[test]
+    fn info_summary_reads_the_fields_openrgb_shows() {
+        // The friend's RS stick at 0x58 (hardware findings, 2026-11-14).
+        let data: [u8; 32] = [
+            0x1C, 0x1B, 0x01, 0x04, 0x04, 0x00, 0x0D, 0x00, 0x06, 0x00, 0x24, 0x00, 0x07, 0x70, 0x02, 0x05,
+            0x65, 0x9C, 0xC7, 0xAF, 0xD0, 0xB2, 0xA0, 0x63, 0xC6, 0x1B, 0x00, 0xF5, 0x04, 0x00, 0x00, 0x00,
+        ];
+        let s = InfoSummary::of(&data);
+        assert_eq!(s, InfoSummary { vendor: 0x1B1C, product_id: 0x0401, firmware: (0, 6, 36), protocol: 4 });
+        assert!(s.is_supported());
+        assert!(!InfoSummary { product_id: 0x0201, ..s }.is_supported());
     }
 
     #[test]

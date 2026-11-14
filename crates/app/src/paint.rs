@@ -100,7 +100,7 @@ const fn spec(family: &'static str, size: f32, bold: bool) -> FontSpec {
 }
 
 /// The window's fonts, in `index()` order.
-const FONTS: [FontSpec; 11] = [
+const FONTS: [FontSpec; 12] = [
     spec("Segoe UI Semibold", 13.0, false),
     spec("Segoe UI", 12.0, false),
     spec("Segoe UI", 12.0, false),
@@ -112,6 +112,8 @@ const FONTS: [FontSpec; 11] = [
     spec("Segoe UI", 15.0, false),
     spec("Segoe UI Light", 28.0, false),
     spec("Segoe UI Light", 22.0, false),
+    // Consolas ships with every Windows, unlike the design's Cascadia Mono.
+    spec("Consolas", 13.0, false),
 ];
 
 pub struct Painter {
@@ -132,6 +134,7 @@ fn index(font: Font) -> usize {
         Font::ErrorBody => 8,
         Font::Heading => 9,
         Font::SlotNumber => 10,
+        Font::Mono => 11,
     }
 }
 
@@ -162,7 +165,7 @@ impl Painter {
     fn draw(&self, g: Graphics, model: &Model, l: &Layout, seconds: f32) {
         let c = &self.canvas;
         // Settings has "‹ Back" where the other screens have the name.
-        if model.screen != Screen::Settings {
+        if !matches!(model.screen, Screen::Settings | Screen::Report) {
             self.text(g, "openiCUE", Font::Brand, Rect { x: 32.0, y: 0.0, w: 160.0, h: layout::TITLE_H }, FG, Align::Near);
         }
         self.text(g, &model.status_line(), Font::Status, l.status, MUTED, Align::Far);
@@ -189,11 +192,21 @@ impl Painter {
                 self.draw_order_screens(g, model, l);
                 return;
             }
+            Screen::Report => {
+                self.draw_report(g, model, l);
+                return;
+            }
             Screen::App => {}
         }
 
         if let Some(p) = l.preview {
             self.draw_preview(g, model, p, seconds);
+        }
+        if let (Some(bar), Some(text), Some(notice)) = (l.notice, l.notice_text, model.unsupported_notice()) {
+            c.rounded(g, bar, bar.h / 2.0, SLOT_EMPTY);
+            let dot = Rect { x: bar.x + 16.0, y: bar.y + bar.h / 2.0 - 3.5, w: 7.0, h: 7.0 };
+            c.rounded(g, dot, 3.5, ORANGE);
+            self.text(g, &notice, Font::Body, text, PILL_TEXT, Align::Near);
         }
         if let Some(r) = l.effects_label {
             self.text(g, "Effects", Font::Label, r, MUTED, Align::Near);
@@ -233,7 +246,15 @@ impl Painter {
     /// stick's 4 extra LEDs fold away, leaving frame LEDs 0, 2, 4, 5, 7 and 9.
     fn draw_preview(&self, g: Graphics, model: &Model, p: Rect, seconds: f32) {
         let c = &self.canvas;
-        let frame = preview::colors(&model.settings, seconds);
+        let mut frame = preview::colors(&model.settings, seconds);
+        // Rows past the supported sticks stay dark while some aren't
+        // supported: openiCUE leaves those sticks alone (design, 2026-11-15).
+        if !model.unsupported.is_empty() {
+            for row in frame.iter_mut().skip(model.sticks) {
+                *row = [Rgb(0x17, 0x19, 0x1D); 10];
+            }
+        }
+        let dark = |row: usize| !model.unsupported.is_empty() && row >= model.sticks;
         let mut row_y = p.y;
         let rows: Vec<PreviewRow> = (0..frame.len())
             .map(|row| {
@@ -255,7 +276,7 @@ impl Painter {
             let clip = Rect { x: r.body.x + 1.0 - reach, y: r.body.y + 1.0 - reach, w: r.body.w - 2.0 + 2.0 * reach, h: r.body.h - 2.0 + 2.0 * reach };
             let glows = || {
                 for (&(led, w), &color) in r.leds.iter().zip(colors) {
-                    let alpha = f32::from(GLOW_ALPHA) * w;
+                    let alpha = if dark(row) { 0.0 } else { f32::from(GLOW_ALPHA) * w };
                     if alpha >= 1.0 {
                         c.glow(g, led, argb(color, alpha.round() as u8));
                     }
@@ -312,6 +333,38 @@ impl Painter {
                 c.rounded(g, Rect { x, w: 3.0, ..pins }, 0.0, with_alpha(STICK_PINS, alpha));
                 x += 5.0;
             }
+        }
+    }
+
+    /// "Report an unsupported stick".
+    fn draw_report(&self, g: Graphics, model: &Model, l: &Layout) {
+        let c = &self.canvas;
+        if let Some(r) = l.heading {
+            self.text(g, model::REPORT_TITLE, Font::Heading, r, FG, Align::Near);
+        }
+        if let Some(r) = l.body {
+            self.wrapped(g, model::REPORT_BODY, Font::Body, r, MUTED, Align::Near);
+        }
+        if let Some(r) = l.report_box {
+            c.rounded(g, r, 12.0, DIVIDER);
+            c.rounded(g, inset(r), 11.0, SLOT_EMPTY);
+            for (i, line) in model.report_text().lines().enumerate() {
+                let row = Rect { x: r.x + 20.0, y: r.y + 16.0 + i as f32 * 20.0, w: r.w - 40.0, h: 20.0 };
+                self.text(g, line, Font::Mono, row, PILL_TEXT, Align::Near);
+            }
+        }
+        if let Some(r) = l.privacy {
+            // A 16 px padlock to the left of the note.
+            let (x, y) = (r.x - 26.0, r.y + 2.0);
+            c.line(g, MUTED, 1.2, &[(x + 3.5, y + 7.5), (x + 12.5, y + 7.5), (x + 12.5, y + 14.5), (x + 3.5, y + 14.5), (x + 3.5, y + 7.5)]);
+            c.line(g, MUTED, 1.2, &[(x + 5.5, y + 7.5), (x + 5.5, y + 4.5), (x + 6.5, y + 2.8), (x + 8.0, y + 2.3), (x + 9.5, y + 2.8), (x + 10.5, y + 4.5), (x + 10.5, y + 7.5)]);
+            self.wrapped(g, model::REPORT_PRIVACY, Font::Small, r, PILL_TEXT, Align::Near);
+        }
+        if let Some(r) = l.footer {
+            self.text(g, model::REPORT_FOOTER, Font::Small, r, MUTED, Align::Near);
+        }
+        for b in &l.buttons {
+            self.button(g, model, b.rect, b.target);
         }
     }
 
@@ -411,6 +464,15 @@ impl Painter {
         let s = &model.settings;
         match target {
             Target::Close | Target::Preview => {}
+            Target::ReportIt | Target::CopyReport => {
+                let label = if target == Target::ReportIt { "Report it" } else { "Copy report" };
+                c.rounded(g, r, 22.0, PILL);
+                self.text(g, label, Font::Body, r, FG, Align::Center);
+            }
+            Target::OpenIssue => {
+                c.rounded(g, r, 22.0, FG);
+                self.text(g, "Open GitHub issue", Font::BodyBold, r, BG, Align::Center);
+            }
             Target::Effect(e) => {
                 let on = s.effect == e;
                 c.rounded(g, r, 22.0, if on { FG } else { PILL });

@@ -2,7 +2,7 @@
 use openicue_core::costs::{Cost, Costs};
 use openicue_core::effects::{Direction, Effect, Rgb, Settings, Speed, ALL_EFFECTS, BRIGHTNESS_RANGE, SPEED_PCT_RANGE};
 use openicue_core::order::StickOrder;
-pub use openicue_core::ram::Family;
+pub use openicue_core::ram::{Family, InfoSummary};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
@@ -12,6 +12,28 @@ pub enum Screen {
     Settings,
     /// "Which slot is lit?": the user places each stick in its slot.
     Arrange,
+    /// "Report an unsupported stick", from the notice under the preview.
+    Report,
+}
+
+pub const REPORT_TITLE: &str = "Report an unsupported stick";
+pub const REPORT_BODY: &str = "openiCUE found a Corsair stick it doesn't support yet, so it hasn't changed its lighting. This report helps add support for it. On GitHub, add your RAM's model from the label on the stick.";
+pub const REPORT_PRIVACY: &str = "Your sticks' serial numbers are left out. This report only includes the vendor, product ID, firmware and protocol openiCUE needs to add support.";
+pub const REPORT_FOOTER: &str = "Opens github.com in your browser. Submitting needs a GitHub account.";
+/// Where reports go: the project's issue form for unsupported RAM.
+const ISSUE_FORM: &str = "https://github.com/ShehanEk/openiCUE/issues/new?template=unsupported-ram.yml";
+
+/// Percent-encodes everything but RFC 3986's unreserved characters.
+fn url_encode(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() * 3);
+    for b in text.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 pub const SETTINGS_TITLE: &str = "Settings";
@@ -146,6 +168,10 @@ pub struct Model {
     pub details_open: bool,
     /// How far the last open or close has run, from 0 to 1.
     pub details_progress: f32,
+    /// Corsair sticks that answered but aren't supported yet: (address, info).
+    pub unsupported: Vec<(u8, InfoSummary)>,
+    /// "Windows 11, build 26200", for the report.
+    pub os: String,
 }
 
 /// The preview's open and close: each row takes `DETAILS_ROW_MS`, and each
@@ -180,6 +206,8 @@ impl Model {
             families: Vec::new(),
             details_open: false,
             details_progress: 1.0,
+            unsupported: Vec::new(),
+            os: String::new(),
             screen: Screen::App,
             sticks: 0,
             settings: settings.normalized(),
@@ -259,9 +287,53 @@ impl Model {
     }
 
     /// Settings goes back to the app; the picker goes back to Settings, unsaved.
+    /// The notice under the preview, when some sticks aren't supported.
+    pub fn unsupported_notice(&self) -> Option<String> {
+        match self.unsupported.len() {
+            0 => None,
+            1 => Some("1 stick isn't supported yet, so openiCUE leaves it alone.".to_string()),
+            n => Some(format!("{n} sticks aren't supported yet, so openiCUE leaves them alone.")),
+        }
+    }
+
+    pub fn open_report(&mut self) {
+        if self.screen == Screen::App && !self.unsupported.is_empty() {
+            self.screen = Screen::Report;
+            self.message.clear();
+        }
+    }
+
+    /// The report, exactly as it is copied or sent. It holds no serial numbers.
+    pub fn report_text(&self) -> String {
+        let mut lines = vec![
+            format!("openiCUE {}", env!("CARGO_PKG_VERSION")),
+            self.os.clone(),
+            "Chipset: AMD (SMBus PIIX4)".to_string(),
+            format!("Supported sticks found: {}", self.sticks),
+        ];
+        for (addr, s) in &self.unsupported {
+            let vendor = if s.vendor == 0x1B1C { " (Corsair)" } else { "" };
+            let (major, minor, build) = s.firmware;
+            lines.push(String::new());
+            lines.push(format!("Unsupported stick at 0x{addr:02X}"));
+            lines.push(format!("  Vendor     0x{:04X}{vendor}", s.vendor));
+            lines.push(format!("  Product    0x{:04X}", s.product_id));
+            lines.push(format!("  Firmware   {major}.{minor}.{build}"));
+            lines.push(format!("  Protocol   {}", s.protocol));
+        }
+        lines.join("\n")
+    }
+
+    /// A new issue on the project's unsupported-RAM form, with the report filled in.
+    pub fn report_url(&self) -> String {
+        let products: Vec<String> = self.unsupported.iter().map(|(_, s)| format!("0x{:04X}", s.product_id)).collect();
+        let title = format!("Unsupported RAM: product {}", products.join(", "));
+        format!("{ISSUE_FORM}&title={}&report={}", url_encode(&title), url_encode(&self.report_text()))
+    }
+
     pub fn back(&mut self) {
         match self.screen {
-            Screen::Settings => self.screen = Screen::App,
+            Screen::Settings | Screen::Report => self.screen = Screen::App,
             Screen::Arrange => {
                 self.screen = Screen::Settings;
                 self.picks.clear();
@@ -572,8 +644,8 @@ impl Model {
     }
 
     pub fn status_line(&self) -> String {
-        // Settings and the picker show only messages, such as errors.
-        if matches!(self.screen, Screen::Settings | Screen::Arrange) {
+        // Settings, the picker and the report show only messages, such as errors.
+        if matches!(self.screen, Screen::Settings | Screen::Arrange | Screen::Report) {
             return self.message.clone();
         }
         if self.screen != Screen::App {
@@ -868,6 +940,55 @@ mod tests {
         assert_eq!(m.cost_line(), "0 MB · 0% CPU");
         assert_eq!(m.cost_body(), "The RAM runs this itself. Applying stops the background process.");
         assert_eq!(m.apply_label(), "Apply");
+    }
+
+    fn with_unsupported() -> Model {
+        let mut m = Model::new(Settings::default());
+        m.sticks = 3;
+        m.os = "Windows 11, build 26200".into();
+        m.unsupported = vec![(0x5B, InfoSummary { vendor: 0x1B1C, product_id: 0x0201, firmware: (0, 6, 36), protocol: 4 })];
+        m
+    }
+
+    #[test]
+    fn report_matches_the_design_and_has_no_serial() {
+        let m = with_unsupported();
+        let expected = format!(
+            "openiCUE {}\nWindows 11, build 26200\nChipset: AMD (SMBus PIIX4)\nSupported sticks found: 3\n\n\
+             Unsupported stick at 0x5B\n  Vendor     0x1B1C (Corsair)\n  Product    0x0201\n  Firmware   0.6.36\n  Protocol   4",
+            env!("CARGO_PKG_VERSION")
+        );
+        assert_eq!(m.report_text(), expected);
+        assert_eq!(m.unsupported_notice().unwrap(), "1 stick isn't supported yet, so openiCUE leaves it alone.");
+        let mut two = with_unsupported();
+        two.unsupported.push(two.unsupported[0]);
+        assert_eq!(two.unsupported_notice().unwrap(), "2 sticks aren't supported yet, so openiCUE leaves them alone.");
+        assert_eq!(Model::new(Settings::default()).unsupported_notice(), None);
+    }
+
+    #[test]
+    fn report_url_fills_the_issue_form_safely() {
+        let url = with_unsupported().report_url();
+        assert!(url.starts_with("https://github.com/ShehanEk/openiCUE/issues/new?template=unsupported-ram.yml&title=Unsupported%20RAM%3A%20product%200x0201&report=openiCUE%20"));
+        // Only unreserved characters and escapes after the fixed prefix: no
+        // stray `&`, `#` or spaces that could change the link.
+        let query = &url[url.find("&title=").unwrap()..];
+        assert!(query.chars().all(|c| c.is_ascii_alphanumeric() || "-._~%&=".contains(c)), "{query}");
+        assert_eq!(query.matches('&').count(), 2);
+        assert!(url.contains("%0A%20%20Product%20%20%20%200x0201"));
+    }
+
+    #[test]
+    fn report_screen_opens_only_with_something_to_report() {
+        let mut m = Model::new(Settings::default());
+        m.open_report();
+        assert_eq!(m.screen, Screen::App);
+        let mut m = with_unsupported();
+        m.open_report();
+        assert_eq!(m.screen, Screen::Report);
+        assert_eq!(m.status_line(), "");
+        m.back();
+        assert_eq!(m.screen, Screen::App);
     }
 
     #[test]
