@@ -4,7 +4,7 @@
 
 # openiCUE
 
-**A tiny, open-source lighting controller for Corsair Vengeance RGB Pro memory on Windows.**
+**A tiny, open-source lighting controller for Corsair Vengeance RGB Pro, Pro SL and RS memory on Windows.**
 
 No account, no tray icon, no background bloat: pick an effect, press Apply, close the window.
 
@@ -17,6 +17,19 @@ No account, no tray icon, no background bloat: pick an effect, press Apply, clos
 </div>
 
 ---
+
+## Screenshots
+
+<table>
+<tr>
+<td width="50%"><img src="docs/images/main.png" alt="openiCUE window with Rainbow wave selected, showing a live preview of 4 sticks and the effect's settings"></td>
+<td width="50%"><img src="docs/images/sticks.png" alt="The preview opened to show each stick: two Vengeance RGB RS with 6 LEDs and two Vengeance RGB Pro SL with 10 LEDs"></td>
+</tr>
+<tr>
+<td align="center"><sub>Pick an effect and tune it. The preview shows exactly what the sticks will do.</sub></td>
+<td align="center"><sub>Click the preview to see the stick in each slot, here a mixed RS and Pro SL kit.</sub></td>
+</tr>
+</table>
 
 ## Why openiCUE
 
@@ -36,19 +49,37 @@ Vendor RGB suites are large, always running, and want an account. openiCUE does 
 - **Keep sticks in sync:** each stick runs its own timer, so hardware effects drift apart. openiCUE can draw them from one clock instead, and does so by default.
 - **Effect settings:** up to 4 colours, speed, brightness, direction and reverse.
 - **Resource cost shown up front:** every effect shows its memory and CPU cost before you apply it.
+- **Stick details:** click the preview to see each slot's model, LED count and position, with a smooth animation.
+- **Mixed kits:** Pro, Pro SL and RS sticks work together, and effects line up across 6-LED and 10-LED sticks.
 - **Stick order:** Setup lights each stick in turn so you can tell openiCUE which slot is which. Change it later under **Settings → Stick order**.
 - **Custom dark installer:** installs, upgrades and uninstalls cleanly, including the driver.
 
 ## Supported hardware
 
+### Memory
+
+| Model | Product ID | LEDs | Status |
+|---|---|---|---|
+| Corsair Vengeance RGB Pro DDR4 | `0x0100`, `0x0101` | 10 | ✅ Tested on real hardware |
+| Corsair Vengeance RGB Pro SL DDR4 | `0x0300`, `0x0301` | 10 | ✅ Tested on real hardware |
+| Corsair Vengeance RGB RS DDR4 | `0x0400`, `0x0401` | 6 | ✅ Tested on real hardware |
+| Other Corsair memory (Dominator, DDR5) | | | ❓ Not detected yet |
+
+### Tested systems
+
+| PC | Sticks | Result |
+|---|---|---|
+| AMD, Gigabyte B550, Windows 11 | 4 × Vengeance RGB Pro | ✅ Every effect, sync, stick order, restore at logon, installer and uninstaller |
+| AMD Ryzen, Windows 11 | 2 × Vengeance RGB RS + 2 × Vengeance RGB Pro SL (mixed kit) | ✅ All 4 sticks detected, every effect works |
+
+### Chipsets
+
 | | Status |
 |---|---|
-| Corsair Vengeance RGB Pro DDR4 (product `0x0100`/`0x0101`) | ✅ Tested: 4 sticks |
-| Corsair Vengeance RGB Pro SL DDR4 (product `0x0300`/`0x0301`) | ✅ Tested |
-| Corsair Vengeance RGB RS DDR4 (product `0x0400`/`0x0401`, 6 LEDs) | ✅ Tested, including mixed with Pro SL |
-| AMD chipsets (SMBus PIIX4), e.g. B550 | ✅ Tested |
-| Intel chipsets | ❌ Not yet supported |
-| Other Corsair memory (Dominator, DDR5) | ❓ Untested; not detected |
+| AMD (SMBus PIIX4), e.g. B550 | ✅ Tested |
+| Intel | ❌ Not yet supported |
+
+Have a different kit? Please [open an issue](../../issues); see [Contributing](#contributing) for what to include.
 
 openiCUE writes only to addresses `0x58`–`0x5F`, and only to sticks that pass detection and identification. See [`docs/hardware-findings.md`](docs/hardware-findings.md) for the full test log.
 
@@ -119,7 +150,7 @@ See [`docs/roadmap.md`](docs/roadmap.md) for status and design decisions.
 
 ## Contributing
 
-Issues and pull requests are welcome. For hardware support, please include your motherboard, chipset and the output of `openicue-hwtest detect` and `info`, run from an administrator terminal.
+Issues and pull requests are welcome. For hardware support, please include your motherboard, your RAM's model and the output of `openicue-hwtest idblock`, run from an administrator terminal. `idblock` only reads, and changes no lighting. Build the tool with `cargo build --release -p openicue-hwtest`.
 
 ## Acknowledgements
 

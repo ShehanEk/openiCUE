@@ -6,7 +6,7 @@
 mod paint;
 
 use openicue::model::{Family, Model};
-use openicue_core::effects::{Effect, Settings};
+use openicue_core::effects::{Direction, Effect, Settings};
 use openicue_core::order::StickOrder;
 use std::ptr::null_mut;
 use windows_sys::Win32::Graphics::Gdi::*;
@@ -36,6 +36,23 @@ fn main() {
             render(&painter, &m, &path);
             println!("{}", path.display());
         }
+    }
+    // The README's screenshots: a wave moving across the sticks.
+    let readme = [
+        ("readme-main", [Some(Family::Pro); 4], false),
+        ("readme-sticks", [Some(Family::Rs), Some(Family::Rs), Some(Family::ProSl), Some(Family::ProSl)], true),
+    ];
+    for (name, families, open) in readme {
+        let settings = Settings { effect: Effect::RainbowWave, direction: Direction::Right, ..Settings::default() };
+        let mut m = Model::new(settings);
+        m.sticks = 4;
+        m.families = families.to_vec();
+        m.order = StickOrder::identity(4);
+        m.details_open = open;
+        m.details_progress = 1.0;
+        let path = out.join(format!("{name}.bmp"));
+        render(&painter, &m, &path);
+        println!("{}", path.display());
     }
 }
 
