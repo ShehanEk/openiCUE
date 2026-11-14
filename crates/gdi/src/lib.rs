@@ -158,6 +158,17 @@ impl Canvas {
         let d = (radius * 2.0).min(r.w).min(r.h);
         let mut path = null_mut();
         let mut brush = null_mut();
+        // A zero-size arc makes GDI+ reject the whole path, so square corners
+        // (dividers, lines, stripes) are filled as a plain rectangle.
+        if d <= 0.0 {
+            // SAFETY: live GDI+ graphics; the brush is deleted here.
+            unsafe {
+                GdipCreateSolidFill(color, &mut brush);
+                GdipFillRectangle(g, brush.cast(), r.x, r.y, r.w, r.h);
+                GdipDeleteBrush(brush.cast());
+            }
+            return;
+        }
         // SAFETY: live GDI+ objects; path and brush are deleted here.
         unsafe {
             GdipCreatePath(FillModeAlternate, &mut path);

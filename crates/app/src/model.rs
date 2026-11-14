@@ -2,6 +2,7 @@
 use openicue_core::costs::{Cost, Costs};
 use openicue_core::effects::{Direction, Effect, Rgb, Settings, Speed, ALL_EFFECTS, BRIGHTNESS_RANGE, SPEED_PCT_RANGE};
 use openicue_core::order::StickOrder;
+pub use openicue_core::ram::Family;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
@@ -138,11 +139,47 @@ pub struct Model {
     pub picks: Vec<usize>,
     /// How many sticks are being arranged.
     pub arranging: usize,
+    /// Each found stick's model line, in address order; `None` if its info
+    /// didn't read back.
+    pub families: Vec<Option<Family>>,
+    /// Whether the preview shows the sticks' models (a click toggles it).
+    pub details_open: bool,
+    /// How far the last open or close has run, from 0 to 1.
+    pub details_progress: f32,
+}
+
+/// The preview's open and close: each row takes `DETAILS_ROW_MS`, and each
+/// starts `DETAILS_STAGGER_MS` after the one before it.
+pub const DETAILS_ROW_MS: f32 = 450.0;
+pub const DETAILS_STAGGER_MS: f32 = 50.0;
+pub const DETAILS_TOTAL_MS: f32 = DETAILS_ROW_MS + 3.0 * DETAILS_STAGGER_MS;
+/// A preview row's height with the details open.
+pub const PREVIEW_ROW_OPEN: f32 = 52.0;
+
+/// Fast at first, gentle at the end, like the design's cubic-bezier(.2,.8,.2,1).
+fn ease_out(t: f32) -> f32 {
+    1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3)
+}
+
+pub fn family_name(family: Option<Family>) -> &'static str {
+    match family {
+        Some(Family::Pro) => "Vengeance RGB Pro",
+        Some(Family::ProSl) => "Vengeance RGB Pro SL",
+        Some(Family::Rs) => "Vengeance RGB RS",
+        None => "Corsair RGB stick",
+    }
+}
+
+pub fn family_leds(family: Option<Family>) -> usize {
+    if family == Some(Family::Rs) { 6 } else { 10 }
 }
 
 impl Model {
     pub fn new(settings: Settings) -> Model {
         Model {
+            families: Vec::new(),
+            details_open: false,
+            details_progress: 1.0,
             screen: Screen::App,
             sticks: 0,
             settings: settings.normalized(),
@@ -154,6 +191,64 @@ impl Model {
             picks: Vec::new(),
             arranging: 0,
         }
+    }
+
+    /// Opens or closes the stick details, from wherever the last move got to.
+    pub fn toggle_details(&mut self) {
+        // Reversing midway starts where the other direction shows the same
+        // amount, so nothing jumps: solve the ease for it.
+        let amount = self.details_amount();
+        self.details_open = !self.details_open;
+        let eased = if self.details_open { 1.0 - (1.0 - amount).cbrt() } else { 1.0 - amount.cbrt() };
+        self.details_progress = eased * DETAILS_ROW_MS / DETAILS_TOTAL_MS;
+    }
+
+    /// How open row `row` is (0 closed, 1 open). Opening runs top to bottom,
+    /// closing bottom to top.
+    pub fn details_row(&self, row: usize) -> f32 {
+        let order = if self.details_open { row } else { 3usize.saturating_sub(row) };
+        let elapsed = self.details_progress.clamp(0.0, 1.0) * DETAILS_TOTAL_MS - order as f32 * DETAILS_STAGGER_MS;
+        let k = ease_out(elapsed / DETAILS_ROW_MS);
+        if self.details_open { k } else { 1.0 - k }
+    }
+
+    /// How open the preview is overall, for its height. Like the design, the
+    /// height moves over one row's time, without the stagger.
+    pub fn details_amount(&self) -> f32 {
+        let k = ease_out(self.details_progress.clamp(0.0, 1.0) * DETAILS_TOTAL_MS / DETAILS_ROW_MS);
+        if self.details_open { k } else { 1.0 - k }
+    }
+
+    /// Row `row`'s height in the preview: a 16 px LED bar closed, a 52 px
+    /// stick open. Each row grows with its own stick, as in the design.
+    pub fn preview_row_h(&self, row: usize) -> f32 {
+        16.0 + (PREVIEW_ROW_OPEN - 16.0) * self.details_row(row)
+    }
+
+    /// The space between preview rows: 8 px closed, 10 px open.
+    pub fn preview_gap(&self) -> f32 {
+        8.0 + 2.0 * self.details_amount()
+    }
+
+    /// The whole preview's height: 4 rows and the 3 gaps between them.
+    pub fn preview_height(&self) -> f32 {
+        (0..4).map(|row| self.preview_row_h(row)).sum::<f32>() + 3.0 * self.preview_gap()
+    }
+
+    /// How visible row `row`'s label is. As in the design, labels fade in over
+    /// 300 ms, 150 ms after their stick starts; closing, they fade out first.
+    pub fn details_label(&self, row: usize) -> f32 {
+        let ms = self.details_progress.clamp(0.0, 1.0) * DETAILS_TOTAL_MS;
+        if self.details_open {
+            ease_out((ms - row as f32 * DETAILS_STAGGER_MS - 150.0) / 300.0)
+        } else {
+            1.0 - ease_out((ms - 3usize.saturating_sub(row) as f32 * 30.0) / 300.0)
+        }
+    }
+
+    /// The model line of the stick in physical slot `slot`.
+    pub fn slot_family(&self, slot: usize) -> Option<Family> {
+        self.order.stick_at(slot).and_then(|s| self.families.get(s).copied().flatten())
     }
 
     pub fn open_settings(&mut self) {
@@ -773,6 +868,46 @@ mod tests {
         assert_eq!(m.cost_line(), "0 MB · 0% CPU");
         assert_eq!(m.cost_body(), "The RAM runs this itself. Applying stops the background process.");
         assert_eq!(m.apply_label(), "Apply");
+    }
+
+    #[test]
+    fn details_open_top_down_and_close_bottom_up() {
+        let mut m = Model::new(Settings::default());
+        assert_eq!((m.details_amount(), m.details_row(0)), (0.0, 0.0), "closed at start");
+        m.toggle_details();
+        assert_eq!(m.details_progress, 0.0);
+        m.details_progress = 0.3;
+        assert!(m.details_row(0) > m.details_row(3), "opening: top row leads");
+        m.details_progress = 1.0;
+        assert!((0..4).all(|r| m.details_row(r) == 1.0) && m.details_amount() == 1.0);
+        m.toggle_details();
+        m.details_progress = 0.3;
+        assert!(m.details_row(3) < m.details_row(0), "closing: bottom row leads");
+        m.details_progress = 1.0;
+        assert!((0..4).all(|r| m.details_row(r) == 0.0));
+    }
+
+    #[test]
+    fn reversing_midway_does_not_jump() {
+        let mut m = Model::new(Settings::default());
+        m.toggle_details();
+        m.details_progress = 0.4;
+        let before = m.details_amount();
+        m.toggle_details();
+        assert!((m.details_amount() - before).abs() < 0.25, "{before} -> {}", m.details_amount());
+    }
+
+    #[test]
+    fn slots_show_their_sticks_family_in_saved_order() {
+        let mut m = Model::new(Settings::default());
+        m.families = vec![Some(Family::Rs), Some(Family::ProSl), None];
+        m.order = StickOrder::identity(3);
+        assert_eq!(m.slot_family(0), Some(Family::Rs));
+        assert_eq!(m.slot_family(1), Some(Family::ProSl));
+        assert_eq!(family_name(m.slot_family(2)), "Corsair RGB stick");
+        assert_eq!(m.slot_family(3), None, "no stick in slot 4");
+        assert_eq!(family_leds(Some(Family::Rs)), 6);
+        assert_eq!(family_leds(None), 10);
     }
 
     #[test]

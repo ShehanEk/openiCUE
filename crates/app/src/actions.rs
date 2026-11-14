@@ -16,15 +16,23 @@ pub struct Hardware {
 pub enum Startup {
     NoDriver,
     NoSticks,
-    Ready(Hardware, usize),
+    /// Each found stick's model line, in address order.
+    Ready(Hardware, Vec<Option<ram::Family>>),
 }
 
-/// Opens PawnIO and finds the sticks. Detection only reads ID registers, so
-/// it's safe while an engine is animating.
+/// Opens PawnIO and finds the sticks, then reads each one's info block for
+/// its model. Detection only reads ID registers. The info read also selects
+/// the block to read, but changes no lighting, and an engine's direct writes
+/// use a different register, so it's safe while an engine animates. A stick
+/// whose info doesn't read back still counts, with no model.
 pub fn startup() -> Startup {
     let Ok(mut bus) = PawnIoBus::open() else { return Startup::NoDriver };
-    let count = ram::detect(&mut bus).len();
-    if count == 0 { Startup::NoSticks } else { Startup::Ready(Hardware { bus }, count) }
+    let found = ram::detect(&mut bus);
+    if found.is_empty() {
+        return Startup::NoSticks;
+    }
+    let families = found.iter().map(|&addr| ram::read_info(&mut bus, addr).ok().map(|i| i.family())).collect();
+    Startup::Ready(Hardware { bus }, families)
 }
 
 fn stop_first() -> Result<(), String> {

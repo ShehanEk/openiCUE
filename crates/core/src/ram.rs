@@ -19,6 +19,17 @@ const RS_LED_COUNT: usize = 6;
 /// so a wave crosses an RS stick in step with a 10-LED stick beside it.
 const RS_FROM_FRAME: [usize; RS_LED_COUNT] = [0, 2, 4, 5, 7, 9];
 
+/// The supported model lines.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum Family {
+    /// Vengeance RGB Pro: 10 LEDs.
+    Pro,
+    /// Vengeance RGB Pro SL, the lower-profile Pro: 10 LEDs.
+    ProSl,
+    /// Vengeance RGB RS: 6 LEDs.
+    Rs,
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct StickInfo {
     addr: StickAddr,
@@ -37,6 +48,15 @@ impl StickInfo {
 
     pub fn protocol(&self) -> u8 {
         self.protocol
+    }
+
+    /// The model line, from the product ID's high byte.
+    pub fn family(&self) -> Family {
+        match self.product_id >> 8 {
+            0x03 => Family::ProSl,
+            0x04 => Family::Rs,
+            _ => Family::Pro,
+        }
     }
 
     /// 6 on a Vengeance RGB RS, 10 on the others.
@@ -700,6 +720,16 @@ mod tests {
             assert_eq!(info.led_count(), 6);
         }
         assert_eq!(stick(4).led_count(), 10);
+    }
+
+    #[test]
+    fn family_follows_the_product_id() {
+        let info = |product_id| StickInfo { addr: addr(0x58), product_id, protocol: 4 };
+        assert_eq!(info(0x0100).family(), Family::Pro);
+        assert_eq!(info(0x0101).family(), Family::Pro);
+        assert_eq!(info(0x0301).family(), Family::ProSl);
+        assert_eq!(info(0x0400).family(), Family::Rs);
+        assert_eq!(info(0x0401).family(), Family::Rs);
     }
 
     #[test]

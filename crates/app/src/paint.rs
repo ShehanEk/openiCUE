@@ -19,6 +19,77 @@ const DIVIDER: u32 = 0xFF1E2126;
 const SLOT_EMPTY: u32 = 0xFF121418;
 /// Alpha at the centre of an LED glow.
 const GLOW_ALPHA: u8 = 0x55;
+/// How far a glow reaches past its LED (`Canvas::glow`), with room to spare.
+const GLOW_REACH: f32 = 20.0;
+
+/// The open preview's stick drawing: body, ridges, gold pins and light bar.
+const STICK_BODY: u32 = 0xFF15171A;
+const STICK_RIDGE: u32 = 0xFF191B1F;
+const STICK_PINS: u32 = 0xFF6E5C2F;
+const LIGHT_BAR: u32 = 0xFF0F1012;
+
+/// One preview row, part way between an LED bar (`k` 0) and a stick (`k` 1).
+struct PreviewRow {
+    k: f32,
+    family: Option<model::Family>,
+    row_y: f32,
+    row_h: f32,
+    body: Rect,
+    bar_h: f32,
+    /// Each frame LED's rect and weight: 1, or fading to 0 on an RS stick.
+    leds: Vec<(Rect, f32)>,
+}
+
+fn preview_row(model: &Model, p: Rect, row: usize, row_y: f32) -> PreviewRow {
+    let k = model.details_row(row);
+    let family = model.slot_family(row);
+    let row_h = model.preview_row_h(row);
+    let full_h = match family {
+        Some(model::Family::ProSl) => 46.0,
+        Some(model::Family::Rs) => 42.0,
+        _ => layout::PREVIEW_ROW_OPEN,
+    };
+    let body_h = layout::lerp(16.0, full_h, k).min(row_h);
+    let body = Rect { x: p.x, y: row_y + row_h - body_h, w: layout::lerp(p.w, 540.0, k), h: body_h };
+    // The light bar: the whole row when closed; 12 px with padding when open.
+    let bar_h = layout::lerp(16.0, 12.0, k);
+    let pad_x = layout::lerp(0.0, 6.0, k);
+    let pad_top = layout::lerp(0.0, 3.0, k);
+    // Each LED has 1 px either side, so neighbours sit 2 px apart. Closed, the
+    // outer 1 px sits outside the row, so the LEDs line up as they always did.
+    let edge = 1.0 - k;
+    let bar = Rect {
+        x: body.x + pad_x - edge,
+        y: body.y + pad_top,
+        w: body.w - 2.0 * pad_x + 2.0 * edge,
+        h: bar_h - pad_top,
+    };
+    let six = model::family_leds(family) == 6;
+    let weight = |i: usize| if six && [1, 3, 6, 8].contains(&i) { 1.0 - k } else { 1.0 };
+    let total: f32 = (0..10).map(weight).sum();
+    let unit = (bar.w - 2.0 * total) / total;
+    let mut x = bar.x;
+    let leds = (0..10)
+        .map(|i| {
+            let w = weight(i);
+            x += w;
+            let led = Rect { x, y: bar.y, w: unit * w, h: bar.h };
+            x += unit * w + w;
+            (led, w)
+        })
+        .collect();
+    PreviewRow { k, family, row_y, row_h, body, bar_h, leds }
+}
+
+/// `color` with its alpha replaced.
+fn with_alpha(color: u32, alpha: u8) -> u32 {
+    (color & 0x00FF_FFFF) | (u32::from(alpha) << 24)
+}
+
+/// `r` inside its 1 px outline.
+fn inset(r: Rect) -> Rect {
+    Rect { x: r.x + 1.0, y: r.y + 1.0, w: r.w - 2.0, h: r.h - 2.0 }
+}
 
 fn argb(c: Rgb, alpha: u8) -> u32 {
     (u32::from(alpha) << 24) | (u32::from(c.0) << 16) | (u32::from(c.1) << 8) | u32::from(c.2)
@@ -122,24 +193,7 @@ impl Painter {
         }
 
         if let Some(p) = l.preview {
-            let frame = preview::colors(&model.settings, seconds);
-            let col_w = (p.w - 9.0 * 2.0) / 10.0;
-            let led = |stick: usize, i: usize| Rect {
-                x: p.x + i as f32 * (col_w + 2.0),
-                y: p.y + stick as f32 * 24.0,
-                w: col_w,
-                h: 16.0,
-            };
-            for (s, row) in frame.iter().enumerate() {
-                for (i, &color) in row.iter().enumerate() {
-                    c.glow(g, led(s, i), argb(color, GLOW_ALPHA));
-                }
-            }
-            for (s, row) in frame.iter().enumerate() {
-                for (i, &color) in row.iter().enumerate() {
-                    c.rounded(g, led(s, i), 2.0, argb(color, 0xFF));
-                }
-            }
+            self.draw_preview(g, model, p, seconds);
         }
         if let Some(r) = l.effects_label {
             self.text(g, "Effects", Font::Label, r, MUTED, Align::Near);
@@ -171,6 +225,93 @@ impl Painter {
         }
         if let Some(r) = l.cost_body {
             self.text(g, model.cost_body(), Font::Small, r, MUTED, Align::Near);
+        }
+    }
+
+    /// The LED preview. Closed, it is 4 rows of 10 LEDs. Open, each row becomes
+    /// a drawing of the stick in that slot, with its model beside it: an RS
+    /// stick's 4 extra LEDs fold away, leaving frame LEDs 0, 2, 4, 5, 7 and 9.
+    fn draw_preview(&self, g: Graphics, model: &Model, p: Rect, seconds: f32) {
+        let c = &self.canvas;
+        let frame = preview::colors(&model.settings, seconds);
+        let mut row_y = p.y;
+        let rows: Vec<PreviewRow> = (0..frame.len())
+            .map(|row| {
+                let r = preview_row(model, p, row, row_y);
+                row_y += r.row_h + model.preview_gap();
+                r
+            })
+            .collect();
+        for (row, (r, colors)) in rows.iter().zip(&frame).enumerate() {
+            let shown = (r.k * 255.0).round() as u8;
+            if shown > 0 {
+                self.stick_body(g, r.body, shown);
+                c.rounded(g, Rect { h: r.bar_h, ..inset(r.body) }, 3.0, with_alpha(LIGHT_BAR, shown));
+            }
+            // A closed LED glows freely (16 px around it); an open stick keeps
+            // its glow inside its body, as the design does. The clip shrinks
+            // in between, so each glow is drawn once per frame.
+            let reach = GLOW_REACH * (1.0 - r.k);
+            let clip = Rect { x: r.body.x + 1.0 - reach, y: r.body.y + 1.0 - reach, w: r.body.w - 2.0 + 2.0 * reach, h: r.body.h - 2.0 + 2.0 * reach };
+            let glows = || {
+                for (&(led, w), &color) in r.leds.iter().zip(colors) {
+                    let alpha = f32::from(GLOW_ALPHA) * w;
+                    if alpha >= 1.0 {
+                        c.glow(g, led, argb(color, alpha.round() as u8));
+                    }
+                }
+            };
+            // Fully closed needs no clip, which keeps the usual frame cheap.
+            if r.k > 0.0 { c.clipped(g, clip, glows) } else { glows() }
+            for (&(led, w), &color) in r.leds.iter().zip(colors) {
+                if w > 0.0 {
+                    c.rounded(g, led, 2.0, argb(color, (255.0 * w).round() as u8));
+                }
+            }
+            // The label slides in from 12 px left, inside the room the stick
+            // gave up, so it never runs past the content edge.
+            let label = model.details_label(row);
+            let label_alpha = (label * 255.0).round() as u8;
+            if label_alpha > 0 && model.order.stick_at(row).is_some() {
+                // Clipped at the sides only, like the design's label box.
+                let room = Rect { x: r.body.x + r.body.w, y: r.row_y - 20.0, w: p.x + p.w - (r.body.x + r.body.w), h: r.row_h + 40.0 };
+                let x = room.x + 20.0 - 12.0 * (1.0 - label);
+                let mid = r.row_y + r.row_h / 2.0;
+                let detail = format!("Slot {} · {} LEDs", row + 1, model::family_leds(r.family));
+                c.clipped(g, room, || {
+                    let name = Rect { x, y: mid - 18.0, w: 236.0, h: 18.0 };
+                    self.text(g, model::family_name(r.family), Font::Small, name, with_alpha(FG, label_alpha), Align::Near);
+                    let below = Rect { x, y: mid, w: 236.0, h: 16.0 };
+                    self.text(g, &detail, Font::Label, below, with_alpha(MUTED, label_alpha), Align::Near);
+                });
+            }
+        }
+    }
+
+    /// A stick's outline, heat spreader ridges and gold pins, at `alpha`.
+    fn stick_body(&self, g: Graphics, body: Rect, alpha: u8) {
+        let c = &self.canvas;
+        c.rounded(g, body, 4.0, with_alpha(SWATCH_EDGE, alpha));
+        let inner = inset(body);
+        c.rounded(g, inner, 3.0, with_alpha(STICK_BODY, alpha));
+        // Ridges between the light bar and the pins: 2 px every 20 px.
+        let ridges = Rect { y: inner.y + 12.0, h: (inner.h - 16.0).max(0.0), ..inner };
+        if ridges.h > 0.0 {
+            c.rounded(g, ridges, 0.0, with_alpha(STICK_RIDGE, alpha));
+            let mut x = ridges.x + 18.0;
+            while x + 2.0 < ridges.right() {
+                c.rounded(g, Rect { x, w: 2.0, ..ridges }, 0.0, with_alpha(STICK_BODY, alpha));
+                x += 20.0;
+            }
+        }
+        // Gold pins along the bottom edge: 3 px every 5 px.
+        let pins = Rect { y: inner.y + inner.h - 4.0, h: 4.0, ..inner };
+        if inner.h > 20.0 {
+            let mut x = pins.x;
+            while x + 3.0 <= pins.right() {
+                c.rounded(g, Rect { x, w: 3.0, ..pins }, 0.0, with_alpha(STICK_PINS, alpha));
+                x += 5.0;
+            }
         }
     }
 
@@ -269,7 +410,7 @@ impl Painter {
         let c = &self.canvas;
         let s = &model.settings;
         match target {
-            Target::Close => {}
+            Target::Close | Target::Preview => {}
             Target::Effect(e) => {
                 let on = s.effect == e;
                 c.rounded(g, r, 22.0, if on { FG } else { PILL });

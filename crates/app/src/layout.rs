@@ -41,6 +41,8 @@ pub enum Font {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
     Close,
+    /// The LED preview: a click shows or hides each stick's model.
+    Preview,
     Effect(Effect),
     /// Colour 1 to 4.
     Color(u8),
@@ -226,8 +228,11 @@ pub fn layout(model: &Model, measure: &dyn Fn(&str, Font) -> f32) -> Layout {
     out.buttons.push(Button { rect: settings, target: Target::Settings });
     out.status.w = settings.x - 12.0 - out.status.x;
 
-    let preview = Rect { x: SIDE, y: TITLE_H + 16.0, w: CONTENT_RIGHT - SIDE, h: 4.0 * 16.0 + 3.0 * 8.0 };
+    // Closed: 4 rows of 16 px LEDs, 8 px apart. Open: 52 px sticks, 10 px apart.
+    let open = model.details_amount();
+    let preview = Rect { x: SIDE, y: TITLE_H + 16.0, w: CONTENT_RIGHT - SIDE, h: model.preview_height() };
     out.preview = Some(preview);
+    out.buttons.push(Button { rect: preview, target: Target::Preview });
     let mut y = preview.y + preview.h + 28.0;
 
     // A running effect's tile has room for its dot. Built-ins kept in sync run too.
@@ -240,25 +245,9 @@ pub fn layout(model: &Model, measure: &dyn Fn(&str, Font) -> f32) -> Layout {
     let tiles: Vec<(Target, f32)> = ALL_EFFECTS.into_iter().map(tile).collect();
     y = flow(&mut out.buttons, &tiles, y + 24.0) + 20.0;
 
-    // The selected effect's settings, set apart from the tiles (user feedback,
-    // 2026-11-07: without this they read as belonging to the background effects).
-    out.divider = Some(Rect { x: SIDE, y, w: CONTENT_RIGHT - SIDE, h: 1.0 });
-    y += 1.0 + 8.0;
-    // Header row: "<effect> settings" on the left, the sync checkbox on the right.
-    let mut label_right = SIDE + 400.0;
-    if model.show_sync() {
-        let w = 8.0 + 15.0 + 8.0 + measure("Keep sticks in sync", Font::Body) + 8.0;
-        let rect = Rect { x: CONTENT_RIGHT - w, y, w, h: PILL_H };
-        out.buttons.push(Button { rect, target: Target::Sync });
-        label_right = label_right.min(rect.x - 8.0);
-    }
-    out.settings_label = Some(Rect { x: SIDE, y, w: label_right - SIDE, h: PILL_H });
-    y += PILL_H + 8.0;
-
-    if model.soft_opts() {
-        soft_options(&mut out, model, measure, y);
-    } else {
-        ram_options(&mut out, model, measure, y);
+    // With the stick details showing, the effect settings make way (design, 2026-11-14).
+    if !model.details_open && open <= 0.0 {
+        effect_settings(&mut out, model, measure, y);
     }
 
     // Bottom row: cost on the left, Stop and Apply on the right.
@@ -276,6 +265,36 @@ pub fn layout(model: &Model, measure: &dyn Fn(&str, Font) -> f32) -> Layout {
     out.cost_line = Some(Rect { x: SIDE, y: BOTTOM - 60.0, w: cost_w, h: 40.0 });
     out.cost_body = Some(Rect { x: SIDE, y: BOTTOM - 18.0, w: cost_w, h: 18.0 });
     out
+}
+
+pub use crate::model::PREVIEW_ROW_OPEN;
+
+pub fn lerp(a: f32, b: f32, k: f32) -> f32 {
+    a + (b - a) * k
+}
+
+/// The selected effect's settings, set apart from the tiles (user feedback,
+/// 2026-11-07: without this they read as belonging to the background effects).
+fn effect_settings(out: &mut Layout, model: &Model, measure: &dyn Fn(&str, Font) -> f32, top: f32) {
+    let mut y = top;
+    out.divider = Some(Rect { x: SIDE, y, w: CONTENT_RIGHT - SIDE, h: 1.0 });
+    y += 1.0 + 8.0;
+    // Header row: "<effect> settings" on the left, the sync checkbox on the right.
+    let mut label_right = SIDE + 400.0;
+    if model.show_sync() {
+        let w = 8.0 + 15.0 + 8.0 + measure("Keep sticks in sync", Font::Body) + 8.0;
+        let rect = Rect { x: CONTENT_RIGHT - w, y, w, h: PILL_H };
+        out.buttons.push(Button { rect, target: Target::Sync });
+        label_right = label_right.min(rect.x - 8.0);
+    }
+    out.settings_label = Some(Rect { x: SIDE, y, w: label_right - SIDE, h: PILL_H });
+    y += PILL_H + 8.0;
+
+    if model.soft_opts() {
+        soft_options(out, model, measure, y);
+    } else {
+        ram_options(out, model, measure, y);
+    }
 }
 
 /// A checkbox's width: 8 px padding, the 15 px box, 8 px, the label, 8 px.
@@ -635,7 +654,26 @@ mod tests {
 
     fn row_targets(m: &Model) -> Vec<Target> {
         targets(&layout(m, &measure)).into_iter().filter(|t| !matches!(t,
-            Target::Close | Target::Settings | Target::Effect(_) | Target::Sync | Target::Apply | Target::Stop)).collect()
+            Target::Close | Target::Preview | Target::Settings | Target::Effect(_) | Target::Sync | Target::Apply | Target::Stop)).collect()
+    }
+
+    #[test]
+    fn open_details_grow_the_preview_and_hide_the_effect_settings() {
+        let closed = layout(&app(Effect::Chase), &measure);
+        let preview = closed.preview.unwrap();
+        assert_eq!(preview.h, 4.0 * 16.0 + 3.0 * 8.0, "closed: the old LED grid");
+        assert!(closed.buttons.iter().any(|b| b.target == Target::Preview && b.rect == preview));
+        assert!(closed.divider.is_some());
+
+        let mut m = app(Effect::Chase);
+        m.toggle_details();
+        m.details_progress = 1.0;
+        let open = layout(&m, &measure);
+        assert_eq!(open.preview.unwrap().h, 4.0 * PREVIEW_ROW_OPEN + 3.0 * 10.0);
+        assert!(open.divider.is_none() && open.settings_label.is_none());
+        assert!(open.buttons.iter().any(|b| b.target == Target::Apply), "Apply stays");
+        let last_tile = open.buttons.iter().filter(|b| matches!(b.target, Target::Effect(_))).map(|b| b.rect.y + b.rect.h).fold(0.0, f32::max);
+        assert!(last_tile <= open.cost_line.unwrap().y, "tiles still fit above the cost");
     }
 
     #[test]

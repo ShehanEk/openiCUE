@@ -2,7 +2,7 @@
 use crate::actions::{self, Startup};
 use crate::paint::Painter;
 use openicue::layout::{self, Layout, Target};
-use openicue::model::{Model, Screen, Slider};
+use openicue::model::{self, Model, Screen, Slider};
 use openicue_core::costs::Cost;
 use openicue_core::effects::Rgb;
 use openicue_core::order::StickOrder;
@@ -21,6 +21,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const TIMER_PREVIEW: usize = 1;
 const TIMER_COST: usize = 2;
+/// Runs only while the stick details open or close.
+const TIMER_DETAILS: usize = 3;
+/// Windows fires timers on its ~15.6 ms tick, after the delay has passed:
+/// 16 ms waits two ticks (about 32 fps), so ask for less to get every tick.
+const DETAILS_FRAME_MS: u32 = 10;
 const PREVIEW_MS: u32 = 90;
 const COST_MS: u32 = 2000;
 const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
@@ -41,11 +46,22 @@ pub struct App {
     pub dragging: Option<Slider>,
     /// The last slider touched, which the Left and Right arrow keys adjust.
     pub last_slider: Option<Slider>,
+    /// When the stick details last started opening or closing, and the
+    /// progress they started from.
+    pub details_from: (Instant, f32),
 }
 
 impl App {
     fn seconds(&self) -> f32 {
         (self.start.elapsed().as_secs_f64() % 86_400.0) as f32
+    }
+
+    /// Moves the details open or close on to now. Returns true when it's done.
+    fn advance_details(&mut self) -> bool {
+        let (since, from) = self.details_from;
+        let ms = since.elapsed().as_secs_f32() * 1000.0;
+        self.model.details_progress = (from + ms / model::DETAILS_TOTAL_MS).min(1.0);
+        self.model.details_progress >= 1.0
     }
 
     /// Opens the driver and finds sticks. Used at start and by "Check again".
@@ -54,9 +70,11 @@ impl App {
         match actions::startup() {
             Startup::NoDriver => self.model.screen = Screen::NoDriver,
             Startup::NoSticks => self.model.screen = Screen::NoSticks,
-            Startup::Ready(hardware, count) => {
+            Startup::Ready(hardware, families) => {
+                let count = families.len();
                 self.model.screen = Screen::App;
                 self.model.sticks = count;
+                self.model.families = families;
                 self.model.order = StickOrder::or_identity(system::load_order(), count);
                 self.hardware = Some(hardware);
             }
@@ -331,6 +349,15 @@ fn click(hwnd: HWND, target: Target) {
         }
         Target::Apply => apply(hwnd),
         Target::Stop => stop(hwnd),
+        Target::Preview => {
+            let Some(a) = app(hwnd) else { return };
+            a.advance_details();
+            a.model.toggle_details();
+            a.details_from = (Instant::now(), a.model.details_progress);
+            // A faster timer while it moves, so the open and close look smooth.
+            // SAFETY: plain call on our own window.
+            unsafe { SetTimer(hwnd, TIMER_DETAILS, DETAILS_FRAME_MS, None) };
+        }
         other => {
             let Some(a) = app(hwnd) else { return };
             match other {
@@ -408,14 +435,32 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
                 let mut rect: RECT = std::mem::zeroed();
                 GetClientRect(hwnd, &mut rect);
                 let seconds = a.seconds();
+                a.advance_details();
                 a.layout = Some(a.painter.paint(hdc, rect.right, rect.bottom, a.scale, &a.model, seconds));
             }
             EndPaint(hwnd, &ps);
             0
         }
         WM_ERASEBKGND => 1,
+        // A pointing hand over anything clickable; the arrow everywhere else.
+        WM_SETCURSOR if (lparam & 0xFFFF) as u32 == HTCLIENT => {
+            let mut point = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
+            GetCursorPos(&mut point);
+            windows_sys::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut point);
+            let over = app(hwnd).is_some_and(|a| {
+                let (x, y) = (point.x as f32 / a.scale, point.y as f32 / a.scale);
+                a.layout.as_ref().and_then(|l| layout::hit(l, x, y)).is_some()
+            });
+            SetCursor(LoadCursorW(null_mut(), if over { IDC_HAND } else { IDC_ARROW }));
+            1
+        }
         WM_TIMER => {
             if wparam == TIMER_PREVIEW {
+                invalidate(hwnd);
+            } else if wparam == TIMER_DETAILS {
+                if app(hwnd).is_none_or(|a| a.advance_details()) {
+                    KillTimer(hwnd, TIMER_DETAILS);
+                }
                 invalidate(hwnd);
             } else if wparam == TIMER_COST {
                 sample_cost(hwnd);
@@ -557,6 +602,7 @@ pub fn run() -> i32 {
             arranging: None,
             dragging: None,
             last_slider: None,
+            details_from: (Instant::now(), 1.0),
         });
         let raw = Box::into_raw(app);
         (*raw).check();
