@@ -1,5 +1,6 @@
 # Builds openiCUE, then a Setup that embeds the fresh binaries and PawnIO.
-$ErrorActionPreference = 'Stop'
+# Not 'Stop': Windows PowerShell treats cargo's progress on stderr as an error.
+# Each step checks $LASTEXITCODE instead.
 Set-Location (Split-Path $PSScriptRoot -Parent)
 cargo build --release -p openicue -p openicue-engine
 if ($LASTEXITCODE -ne 0) { exit 1 }

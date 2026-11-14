@@ -43,10 +43,12 @@ Vendor RGB suites are large, always running, and want an account. openiCUE does 
 
 | | Status |
 |---|---|
-| Corsair Vengeance RGB Pro DDR4 (product `0x0101`, protocol 4) | ✅ Tested: 4 sticks at `0x58`–`0x5B` |
+| Corsair Vengeance RGB Pro DDR4 (product `0x0100`/`0x0101`) | ✅ Tested: 4 sticks |
+| Corsair Vengeance RGB Pro SL DDR4 (product `0x0300`/`0x0301`) | ✅ Tested |
+| Corsair Vengeance RGB RS DDR4 (product `0x0400`/`0x0401`, 6 LEDs) | ✅ Tested, including mixed with Pro SL |
 | AMD chipsets (SMBus PIIX4), e.g. B550 | ✅ Tested |
 | Intel chipsets | ❌ Not yet supported |
-| Other Corsair memory | ❓ Untested; not detected |
+| Other Corsair memory (Dominator, DDR5) | ❓ Untested; not detected |
 
 openiCUE writes only to addresses `0x58`–`0x5F`, and only to sticks that pass detection and identification. See [`docs/hardware-findings.md`](docs/hardware-findings.md) for the full test log.
 

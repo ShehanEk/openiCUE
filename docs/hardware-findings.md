@@ -154,3 +154,13 @@ Commit `7186ce7`:
 - **Logo:** logo C ("glowing stick") is the icon for the app and Setup.
 
 The user reinstalled with the new Setup. The icon shows, and the effect came back right after install.
+
+## 2026-11-14: Vengeance RGB RS on a friend's PC
+
+A friend's AMD Ryzen PC has a mixed kit. openiCUE 0.1 found only 2 of 4 sticks.
+
+- **`idblock`:** `0x58` and `0x59` are product `0x0401` (Vengeance RGB RS); `0x5A` and `0x5B` are `0x0301` (Vengeance RGB Pro SL). All are vendor `0x1B1C`, firmware 0.6.36, protocol 4, checksums ok. OpenRGB's `CorsairDRAMDevices.h` lists RS as `0x0400`/`0x0401` with 6 LEDs, driven by the same commands as the Pro.
+- **Direct colour:** a 6-LED direct packet (count 6, 18 colour bytes, CRC8, zero-padded to 32) turned `0x58` green.
+- **Built-in effect:** Rainbow wave on `0x58` worked. Static with the default colour (`2F9BFF`) showed the expected light blue.
+- **Setup with RS support:** the friend installed the new Setup. It found all 4 sticks, and the app's Rainbow wave and red Static worked on all of them: "all working ok" (user report, 2026-11-14).
+- **Also seen:** HWiNFO was running and reading the RAM temperatures. Detection still found all 4 sticks.

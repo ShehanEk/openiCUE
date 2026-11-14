@@ -39,3 +39,7 @@
 - **2026-11-07:** CPU % is shown as a share of all logical processors, like Task Manager.
 - **2026-11-08:** built-in effects get a "Keep sticks in sync" toggle (not Static). Off: the RAM runs them at 0% CPU and the sticks drift apart, because no hardware sync exists. On: the engine draws them in software, in sync, for about 1.5 MB · 0.8% CPU. Settings file is now version 2 (`synced=`); version 1 still loads.
 - **2026-11-08:** effects drawn in software follow a saved physical stick order (`order.txt`). The user sets it in Setup and can change it under Settings → Stick order. Nothing can detect slot positions automatically.
+
+## Locked decisions (hardware support)
+
+- **2026-11-14:** Vengeance RGB RS DDR4 (`0x0400`/`0x0401`) is supported with every effect. It gets the same effect packet as the Pro; Static's colour buffer and direct packets hold 6 LEDs. Frames stay 10 LEDs per stick, and an RS stick shows frame LEDs 0, 2, 4, 5, 7 and 9, so a wave lines up with a 10-LED stick beside it. The RS-only hwtest commands are removed; `idblock` stays.

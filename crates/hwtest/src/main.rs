@@ -7,7 +7,7 @@ use std::process::exit;
 /// NTSTATUS STATUS_ACCESS_DENIED, as `NtOpenFile` returns it.
 const STATUS_ACCESS_DENIED: i32 = 0xC000_0022_u32 as i32;
 
-const USAGE: &str = "usage: openicue-hwtest detect | info | one <58-5F> | effect <name> | sync <name> | save <name> | stop";
+const USAGE: &str = "usage: openicue-hwtest detect | info | idblock | one <58-5F> | effect <name> | sync <name> | save <name> | stop";
 /// How long the `sync` test draws before it stops.
 const SYNC_TEST: std::time::Duration = std::time::Duration::from_secs(30);
 const SYNC_FRAME: std::time::Duration = std::time::Duration::from_millis(100);
@@ -15,6 +15,7 @@ const SYNC_FRAME: std::time::Duration = std::time::Duration::from_millis(100);
 enum Command {
     Detect,
     Info,
+    IdBlock,
     One(StickAddr),
     Effect(Effect),
     Sync(Effect),
@@ -47,6 +48,7 @@ fn main() {
     match command {
         Command::Detect => detect(&mut bus),
         Command::Info => info(&mut bus),
+        Command::IdBlock => id_block(&mut bus),
         Command::One(addr) => one_stick(&mut bus, addr),
         Command::Effect(chosen) => effect(&mut bus, chosen),
         Command::Sync(chosen) => sync(&mut bus, chosen),
@@ -59,6 +61,7 @@ fn parse(args: &[&str]) -> Result<Command, String> {
     match args {
         ["detect"] => Ok(Command::Detect),
         ["info"] => Ok(Command::Info),
+        ["idblock"] => Ok(Command::IdBlock),
         ["one", address] => u8::from_str_radix(address, 16)
             .ok()
             .and_then(StickAddr::new)
@@ -173,6 +176,30 @@ fn info(bus: &mut dyn Bus) {
                 "{:#04x}: product {:#06x}, protocol {}",
                 info.addr().get(), info.product_id(), info.protocol()
             ),
+            Err(error) => println!("{:#04x}: {error:?}", stick.get()),
+        }
+    }
+}
+
+/// Prints every detected stick's raw device info block, for any product.
+/// Selects the block to read but changes no lighting.
+fn id_block(bus: &mut dyn Bus) {
+    for stick in ram::detect(bus) {
+        match ram::read_info_block(bus, stick) {
+            Ok((data, checksum_ok)) => {
+                let hex: Vec<String> = data.iter().map(|b| format!("{b:02X}")).collect();
+                println!("{:#04x}: {}", stick.get(), hex.join(" "));
+                println!(
+                    "  vendor {:#06x}, product {:#06x}, firmware {}.{}.{}, protocol {}, checksum {}",
+                    u16::from_le_bytes([data[0], data[1]]),
+                    u16::from_le_bytes([data[2], data[3]]),
+                    data[9],
+                    data[8],
+                    u16::from_le_bytes([data[10], data[11]]),
+                    data[28],
+                    if checksum_ok { "ok" } else { "MISMATCH" },
+                );
+            }
             Err(error) => println!("{:#04x}: {error:?}", stick.get()),
         }
     }

@@ -7,8 +7,17 @@ pub const REG_BINARY_START: u8 = 0x21;
 pub const REG_BINARY_READ: u8 = 0x40;
 pub const REG_CHECKSUM: u8 = 0x42;
 
+/// LEDs on a Vengeance RGB Pro or Pro SL. Frames hold this many per stick.
 pub const LED_COUNT: usize = 10;
-const SUPPORTED_PRODUCT_IDS: [u16; 4] = [0x0100, 0x0101, 0x0300, 0x0301];
+/// Vengeance RGB Pro (0x01xx), Pro SL (0x03xx) and RS (0x04xx), as in
+/// OpenRGB's `CorsairDRAMDevices.h`. All take the same commands.
+const SUPPORTED_PRODUCT_IDS: [u16; 6] = [0x0100, 0x0101, 0x0300, 0x0301, 0x0400, 0x0401];
+/// Vengeance RGB RS has 6 LEDs (verified on a friend's sticks, 2026-11-14).
+const RS_PRODUCT_IDS: [u16; 2] = [0x0400, 0x0401];
+const RS_LED_COUNT: usize = 6;
+/// Which of a frame's 10 LEDs each RS LED shows: spread evenly, ends kept,
+/// so a wave crosses an RS stick in step with a 10-LED stick beside it.
+const RS_FROM_FRAME: [usize; RS_LED_COUNT] = [0, 2, 4, 5, 7, 9];
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct StickInfo {
@@ -28,6 +37,17 @@ impl StickInfo {
 
     pub fn protocol(&self) -> u8 {
         self.protocol
+    }
+
+    /// 6 on a Vengeance RGB RS, 10 on the others.
+    pub fn led_count(&self) -> usize {
+        if RS_PRODUCT_IDS.contains(&self.product_id) { RS_LED_COUNT } else { LED_COUNT }
+    }
+
+    /// Frame index of each of this stick's LEDs, in order.
+    fn frame_leds(&self) -> &'static [usize] {
+        const ALL: [usize; LED_COUNT] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        if self.led_count() == RS_LED_COUNT { &RS_FROM_FRAME } else { &ALL }
     }
 }
 
@@ -57,14 +77,22 @@ pub fn detect(bus: &mut dyn Bus) -> Vec<StickAddr> {
         .collect()
 }
 
-pub fn read_info(bus: &mut dyn Bus, addr: StickAddr) -> Result<StickInfo, RamError> {
+/// Reads a stick's raw 32-byte device info block, and whether the stick's
+/// checksum of it matches. Selects the block to read but changes no lighting.
+pub fn read_info_block(bus: &mut dyn Bus, addr: StickAddr) -> Result<([u8; 32], bool), RamError> {
     bus.write_byte(addr, REG_DEVICE_INFO, 0)?;
     bus.write_byte(addr, REG_BINARY_START, 0)?;
     let mut data = [0u8; 32];
     for byte in &mut data {
         *byte = bus.read_byte(addr, REG_BINARY_READ)?;
     }
-    if bus.read_byte(addr, REG_CHECKSUM)? != crate::crc::crc8(&data) {
+    let checksum_ok = bus.read_byte(addr, REG_CHECKSUM)? == crate::crc::crc8(&data);
+    Ok((data, checksum_ok))
+}
+
+pub fn read_info(bus: &mut dyn Bus, addr: StickAddr) -> Result<StickInfo, RamError> {
+    let (data, checksum_ok) = read_info_block(bus, addr)?;
+    if !checksum_ok {
         return Err(RamError::ChecksumMismatch);
     }
     let product_id = u16::from_le_bytes([data[2], data[3]]);
@@ -163,14 +191,11 @@ pub fn apply_builtin(bus: &mut dyn Bus, stick: &StickInfo, settings: &Settings) 
     apply_builtin_all(bus, std::slice::from_ref(stick), settings).remove(0)
 }
 
-/// Static's colour, dimmed by the brightness setting. At 100 % it is `color1` as is.
-fn static_colors(settings: &Settings) -> [u8; LED_COUNT * 4] {
+/// Static's colour for each of the stick's LEDs, dimmed by the brightness
+/// setting: R, G, B, 0xFF per LED. At 100 % it is `color1` as is.
+fn static_colors(settings: &Settings, stick: &StickInfo) -> Vec<u8> {
     let Rgb(r, g, b) = settings.color1.dimmed(settings.brightness);
-    let mut colors = [0u8; LED_COUNT * 4];
-    for led in colors.as_chunks_mut::<4>().0 {
-        *led = [r, g, b, 255];
-    }
-    colors
+    [r, g, b, 255].repeat(stick.led_count())
 }
 
 /// Applies a built-in effect to every stick so their animations start
@@ -197,26 +222,30 @@ pub fn apply_builtin_all(bus: &mut dyn Bus, sticks: &[StickInfo], settings: &Set
     }
     std::thread::sleep(std::time::Duration::from_millis(EFFECT_SETTLE_MS));
     if settings.effect == crate::effects::Effect::Static {
-        let colors = static_colors(&settings);
         for (stick, result) in sticks.iter().zip(results.iter_mut()) {
             if result.is_ok() {
-                *result = write_buffer(bus, stick.addr, &colors, COMMIT_COLORS);
+                *result = write_buffer(bus, stick.addr, &static_colors(&settings, stick), COMMIT_COLORS);
             }
         }
     }
     results
 }
 
+/// Shows one frame row on a stick. OpenRGB's direct packet: LED count,
+/// R/G/B per LED, CRC8, sent as one 32-byte block to 0x31 (zero-padded on a
+/// 6-LED RS stick). No commit, so nothing is saved to the stick's memory.
 pub fn write_direct(bus: &mut dyn Bus, stick: &StickInfo, leds: &[Rgb; LED_COUNT]) -> Result<(), RamError> {
     if stick.protocol < 4 {
         return Err(RamError::ProtocolTooOld(stick.protocol));
     }
-    let mut packet = [0u8; 2 + LED_COUNT * 3];
-    packet[0] = LED_COUNT as u8;
-    for (slot, led) in packet[1..].as_chunks_mut::<3>().0.iter_mut().zip(leds) {
+    let used = 2 + stick.led_count() * 3;
+    let mut packet = [0u8; 32];
+    packet[0] = stick.led_count() as u8;
+    for (slot, &index) in packet[1..used - 1].as_chunks_mut::<3>().0.iter_mut().zip(stick.frame_leds()) {
+        let led = leds[index];
         *slot = [led.0, led.1, led.2];
     }
-    packet[31] = crate::crc::crc8(&packet[..31]);
+    packet[used - 1] = crate::crc::crc8(&packet[..used - 1]);
     bus.write_block(stick.addr, REG_DIRECT_BLOCK, &packet)?;
     Ok(())
 }
@@ -644,5 +673,76 @@ mod tests {
             Err(RamError::ProtocolTooOld(3))
         );
         assert!(bus.ops.is_empty());
+    }
+
+    fn blocks(bus: &FakeBus) -> Vec<Op> {
+        bus.ops.iter().filter(|op| matches!(op, Op::Block(..))).cloned().collect()
+    }
+
+    fn rs_stick() -> StickInfo {
+        StickInfo { addr: addr(0x58), product_id: 0x0401, protocol: 4 }
+    }
+
+    #[test]
+    fn read_info_block_returns_raw_bytes_for_any_product() {
+        let mut bus = FakeBus { info: info_block(0x0700, 4), ..Default::default() };
+        let (data, checksum_ok) = read_info_block(&mut bus, addr(0x58)).unwrap();
+        assert!(checksum_ok);
+        assert_eq!(&data[..], &info_block(0x0700, 4)[..]);
+        assert_eq!(read_info(&mut bus, addr(0x58)), Err(RamError::UnsupportedProduct(0x0700)));
+    }
+
+    #[test]
+    fn rs_sticks_are_supported_with_six_leds() {
+        for product in [0x0400, 0x0401] {
+            let mut bus = FakeBus { info: info_block(product, 4), ..Default::default() };
+            let info = read_info(&mut bus, addr(0x58)).unwrap();
+            assert_eq!(info.led_count(), 6);
+        }
+        assert_eq!(stick(4).led_count(), 10);
+    }
+
+    #[test]
+    fn rs_direct_sends_openrgbs_six_led_packet() {
+        // Frame LEDs 0, 2, 4, 5, 7, 9 reach the RS stick's 6 LEDs.
+        let leds: [Rgb; LED_COUNT] = std::array::from_fn(|i| Rgb(i as u8, 0, 0));
+        let mut bus = FakeBus::default();
+        write_direct(&mut bus, &rs_stick(), &leds).unwrap();
+        let mut expected = vec![0u8; 32];
+        expected[0] = 6;
+        for (led, index) in [0u8, 2, 4, 5, 7, 9].into_iter().enumerate() {
+            expected[1 + led * 3] = index;
+        }
+        expected[19] = crate::crc::crc8(&expected[..19]);
+        assert_eq!(blocks(&bus), vec![Op::Block(0x58, 0x31, expected)]);
+    }
+
+    #[test]
+    fn rs_built_in_effects_send_the_same_packet_as_a_pro_stick() {
+        let settings = Settings { effect: crate::effects::Effect::RainbowWave, ..Settings::default() };
+        let mut rs = FakeBus::default();
+        apply_builtin(&mut rs, &rs_stick(), &settings).unwrap();
+        let mut pro = FakeBus::default();
+        apply_builtin(&mut pro, &stick(4), &settings).unwrap();
+        assert_eq!(writes(&rs), writes(&pro));
+    }
+
+    #[test]
+    fn rs_static_writes_six_leds_of_color() {
+        let settings = Settings {
+            effect: crate::effects::Effect::Static,
+            color1: Rgb(0, 255, 0),
+            ..Settings::default()
+        };
+        let mut bus = FakeBus::default();
+        apply_builtin(&mut bus, &rs_stick(), &settings).unwrap();
+        let color_bytes: Vec<u8> = writes(&bus)
+            .iter()
+            .skip_while(|&&w| w != (REG_COMMIT, COMMIT_EFFECT))
+            .filter(|&&(reg, _)| reg == REG_BINARY_WRITE)
+            .map(|&(_, value)| value)
+            .collect();
+        assert_eq!(color_bytes, [0, 255, 0, 255].repeat(6));
+        assert_eq!(writes(&bus).last(), Some(&(REG_COMMIT, COMMIT_COLORS)));
     }
 }
