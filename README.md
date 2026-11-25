@@ -85,13 +85,11 @@ openiCUE writes only to addresses `0x58`–`0x5F`, and only to sticks that pass 
 
 ## Installation
 
-1. Download `openiCUE-Setup.exe` from the [Releases](../../releases) page.
-2. Run it and click **Install**. Setup asks for administrator rights, because the SMBus driver needs them.
+> **There are no downloads yet.** openiCUE isn't code-signed, so instead of asking you to trust an unsigned exe, it's built from this source on your own PC. It takes a few minutes. Signed releases are on the [roadmap](#roadmap).
+
+1. Build the installer: follow [Building from source](#building-from-source), steps 1–4.
+2. Run `target\release\openiCUE-Setup.exe` and click **Install**. Setup asks for administrator rights, because the SMBus driver needs them.
 3. Follow the stick order step, then open **openiCUE** from the Start menu.
-
-> **Note:** the installer is not code-signed yet, so Windows SmartScreen may warn you. Click **More info → Run anyway**.
-
-**Rather not run a downloaded exe?** Build openiCUE yourself from this source: see [Building from source](#building-from-source).
 
 To uninstall, use **Settings → Apps** in Windows. This removes openiCUE, its logon task and its settings.
 
