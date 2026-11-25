@@ -91,6 +91,8 @@ openiCUE writes only to addresses `0x58`–`0x5F`, and only to sticks that pass 
 
 > **Note:** the installer is not code-signed yet, so Windows SmartScreen may warn you. Click **More info → Run anyway**.
 
+**Rather not run a downloaded exe?** Build openiCUE yourself from this source: see [Building from source](#building-from-source).
+
 To uninstall, use **Settings → Apps** in Windows. This removes openiCUE, its logon task and its settings.
 
 ## How it works
@@ -119,17 +121,87 @@ Found a security issue? Please report it privately rather than opening a public 
 
 ## Building from source
 
-**Requirements:** Windows 10 or 11, and Rust (stable, MSVC toolchain).
+### Requirements
+
+| | |
+|---|---|
+| **Windows** | 10 or 11, 64-bit |
+| **Rust** | Stable, MSVC toolchain (tested with Rust 1.99). Install it from [rustup.rs](https://rustup.rs). |
+| **C++ build tools** | [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with **Desktop development with C++**, for the MSVC linker and the Windows SDK. The Rust installer offers to add them. |
+| **Git** | To clone the repository. |
+
+The only Rust dependency is [`windows-sys`](https://crates.io/crates/windows-sys), and the bundled PawnIO installer is already in the repository, so nothing else needs downloading.
+
+### Build
+
+Run these from **PowerShell** or **Command Prompt**, not Git Bash (see [Troubleshooting](#troubleshooting)).
+
+1. Clone the repository:
+   ```powershell
+   git clone https://github.com/ShehanEk/openiCUE.git
+   cd openiCUE
+   ```
+2. Run the tests. They need no hardware and no admin rights:
+   ```powershell
+   cargo test --workspace
+   ```
+3. Build the window and the engine. They are written to `target\release\openicue.exe` and `openicue-engine.exe`:
+   ```powershell
+   cargo build --release -p openicue -p openicue-engine
+   ```
+4. Build the installer. The script runs step 3 first, then embeds both programs and the bundled PawnIO installer into `target\release\openiCUE-Setup.exe`:
+   ```powershell
+   .\scripts\build-setup.ps1
+   ```
+
+### Run your build
+
+Pick one:
+
+- **With your own installer:** run the `openiCUE-Setup.exe` you built in step 4. You get everything: the PawnIO driver, the Start menu entry and restore at logon.
+- **Without any installer:** install the PawnIO driver from its official site, [pawnio.eu](https://pawnio.eu), then run `target\release\openicue.exe`. Effects work the same, but there's no Start menu entry, and synced or custom effects don't come back after you sign in.
+
+Either way:
+
+- **Admin rights:** the window always asks for them, because the RAM is reached through a kernel driver.
+- **Close it before rebuilding:** Windows locks a running program's file.
+
+### The two binaries in this repository
+
+Everything openiCUE runs is built from this source, except two files from the [PawnIO](https://github.com/namazso/PawnIO) project, which openiCUE can't build itself:
+
+| File | What it is |
+|---|---|
+| `crates/setup/payload/PawnIO_setup.exe` | The official, unmodified PawnIO 2.2.0 installer, signed by its author. Setup checks its SHA-256 and signature before running it. |
+| `crates/core/modules/SmbusPIIX4.bin` | PawnIO's SMBus module, which PawnIO itself verifies before loading it. |
+
+To check the installer yourself, both commands should match:
 
 ```powershell
-# Tests (no hardware needed)
-cargo test --workspace
-
-# App, engine and installer
-.\scripts\build-setup.ps1
+Get-FileHash crates\setup\payload\PawnIO_setup.exe   # 1F519A22E47187F70A1379A48CA604981C4FCF694F4E65B734AAA74A9FBA3032
+Get-AuthenticodeSignature crates\setup\payload\PawnIO_setup.exe   # Status: Valid
 ```
 
-The installer is written to `target\release\openiCUE-Setup.exe`.
+### Developer tools
+
+These need no hardware and no admin rights, except `openicue-hwtest`.
+
+| Command | What it does |
+|---|---|
+| `cargo run -p openicue --example snapshot -- <folder>` | Draws the window's screens to BMP files, for checking the UI against the design. |
+| `cargo run -p openicue --example clipcheck` | Puts a sample unsupported-stick report on the clipboard with the app's own copy code. It replaces what's on your clipboard. |
+| `cargo build --release -p openicue-hwtest` | Builds the hardware test tool. Run it from an admin terminal; `detect`, `info` and `idblock` only read. |
+
+### Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| Linking fails in Git Bash, for example `link: extra operand` | Git Bash's own `link` command hides the MSVC linker. Use PowerShell or Command Prompt. |
+| `Access is denied. (os error 5)` during a release build | openiCUE or its engine is running. Close the window and press **Stop** on any running effect, then build again. |
+| PowerShell won't run `build-setup.ps1` | Run `powershell -ExecutionPolicy Bypass -File .\scripts\build-setup.ps1` instead. |
+| `link.exe not found` or missing Windows SDK headers | Install the Visual Studio Build Tools with **Desktop development with C++**. |
+
+### Project layout
 
 | Crate | Purpose |
 |---|---|
